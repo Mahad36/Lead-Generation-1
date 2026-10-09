@@ -1,0 +1,21 @@
+FROM python:3.12-slim
+WORKDIR /app
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PYTHONPATH=/app:/src
+RUN apt-get update && apt-get install -y --no-install-recommends chromium chromium-driver \
+    && rm -rf /var/lib/apt/lists/*
+COPY apps/api/requirements.txt /tmp/requirements.txt
+RUN pip install --no-cache-dir -r /tmp/requirements.txt
+RUN playwright install --with-deps chromium
+# Claude Code CLI for the "Claude Code (your subscription)" AI provider; log in with CLAUDE_CODE_OAUTH_TOKEN in .env
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates \
+    && curl -fsSL https://claude.ai/install.sh | bash \
+    && rm -rf /var/lib/apt/lists/*
+ENV PATH="/root/.local/bin:${PATH}"
+COPY apps/api /app
+COPY workers /workers
+COPY packages /packages
+ENV BROWSER=chrome HEADLESS=true CHROME_BINARY=/usr/bin/chromium CHROMEDRIVER_PATH=/usr/bin/chromedriver
+WORKDIR /src
+ENV PYTHONPATH=/app:/src
+COPY workers /src/workers
+CMD ["celery", "-A", "workers.celery_app.celery_app", "worker", "--loglevel=info"]

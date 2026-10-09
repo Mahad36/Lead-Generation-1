@@ -1,0 +1,163 @@
+# Full stack for local testing:  docker compose up --build
+#   App:        http://localhost:3000   (demo@leadgen.local / DemoPass123!)
+#   Test inbox: http://localhost:8025   (every email the app sends lands here)
+#   API docs:   http://localhost:8000/docs
+# A .env file is optional; values below are development defaults.
+
+x-backend-env: &backend-env
+  ENVIRONMENT: ${ENVIRONMENT:-development}
+  SECRET_KEY: ${SECRET_KEY:-local-dev-secret-change-me-before-deploying}
+  DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-leadgen}:${POSTGRES_PASSWORD:-leadgen}@postgres:5432/${POSTGRES_DB:-leadgen}
+  REDIS_URL: redis://redis:6379/0
+  CELERY_BROKER_URL: redis://redis:6379/0
+  CELERY_RESULT_BACKEND: redis://redis:6379/1
+  FRONTEND_URL: http://localhost:3000
+  BACKEND_URL: http://localhost:8000
+  AI_PROVIDER: ${AI_PROVIDER:-anthropic}
+  AI_API_BASE: ${AI_API_BASE:-https://api.anthropic.com}
+  AI_MODEL: ${AI_MODEL:-claude-opus-5-5}
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: leadgen-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-leadgen}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-leadgen}
+      POSTGRES_DB: ${POSTGRES_DB:-leadgen}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-leadgen} -d ${POSTGRES_DB:-leadgen}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: leadgen-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # Local test inbox: catches every email the app sends (no Gmail needed to test).
+  mailpit:
+    image: axllent/mailpit:latest
+    container_name: leadgen-mailpit
+    restart: unless-stopped
+    environment:
+      MP_SMTP_AUTH_ACCEPT_ANY: "1"
+      MP_SMTP_AUTH_ALLOW_INSECURE: "1"
+    ports:
+      - "8025:8025"
+      - "1025:1025"
+
+  api:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/Dockerfile.api
+    container_name: leadgen-api
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      <<: *backend-env
+      TEST_INBOX_SMTP_HOST: mailpit
+      TEST_INBOX_SMTP_PORT: "1025"
+    command: >
+      sh -c "alembic upgrade head &&
+             python /scripts/seed.py &&
+             uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mailpit:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    volumes:
+      - ./apps/api:/app
+      - ./workers:/workers
+      - ./packages:/packages
+      - ./scripts:/scripts
+
+  worker:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/Dockerfile.worker
+    container_name: leadgen-worker
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      <<: *backend-env
+      HEADLESS: "true"
+    depends_on:
+      api:
+        condition: service_healthy
+    shm_size: "2gb"
+    volumes:
+      - ./apps/api:/app
+      - ./workers:/src/workers
+      - ./packages:/packages
+
+  beat:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/Dockerfile.worker
+    container_name: leadgen-beat
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      <<: *backend-env
+    command: celery -A workers.celery_app.celery_app beat --loglevel=info
+    depends_on:
+      api:
+        condition: service_healthy
+    volumes:
+      - ./apps/api:/app
+      - ./workers:/src/workers
+      - ./packages:/packages
+
+  web:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/Dockerfile.web
+    container_name: leadgen-web
+    restart: unless-stopped
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8000
+      API_INTERNAL_URL: http://api:8000
+    ports:
+      - "3000:3000"
+    depends_on:
+      - api
+    volumes:
+      - ./apps/web:/app
+      - /app/node_modules
+      - /app/.next
+
+volumes:
+  postgres_data:
+  redis_data:

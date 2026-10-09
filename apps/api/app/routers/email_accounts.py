@@ -1,0 +1,261 @@
+from datetime import UTC, datetime
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import RedirectResponse
+from sqlalchemy.orm import Session
+
+from app.config import get_settings
+from app.database import get_db
+from app.deps import get_client_meta, get_current_user
+from app.models import EmailAccount, EmailMessage, User
+from app.services.audit import write_audit
+from pydantic import BaseModel, EmailStr, Field
+
+from app.services.gmail import (
+    GmailSendError,
+    build_authorization_url,
+    exchange_code,
+    oauth_redirect_uri,
+    persist_refreshed_credentials,
+    require_google_oauth,
+    send_gmail_message,
+    sent_today_count,
+    store_account,
+    store_smtp_account,
+    verify_smtp_login,
+    _credentials_from_account,
+    _smtp_payload,
+)
+from app.utils.security import create_oauth_state_token, try_decode_token
+
+router = APIRouter(prefix="/email-accounts", tags=["email-accounts"])
+
+
+class SmtpConnectIn(BaseModel):
+    email_address: EmailStr
+    host: str = Field(min_length=1, max_length=255)
+    port: int = 587
+    username: str = ""
+    password: str = Field(min_length=1)
+    use_tls: bool = True
+    display_name: str = ""
+
+
+@router.get("")
+def list_accounts(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    accounts = (
+        db.query(EmailAccount)
+        .filter(EmailAccount.user_id == user.id)
+        .order_by(EmailAccount.created_at.desc())
+        .all()
+    )
+    out = []
+    for account in accounts:
+        sent_today = sent_today_count(db, account)
+        status = account.status
+        if status == "connected" and "expired" in (account.last_error or "").lower():
+            status = "expired"
+        out.append(
+            {
+                "id": account.id,
+                "email_address": account.email_address,
+                "display_name": account.display_name,
+                "status": status,
+                "daily_limit": account.daily_limit,
+                "sent_today": sent_today,
+                "remaining_today": max(account.daily_limit - sent_today, 0),
+                "last_successful_send_at": account.last_successful_send_at,
+                "last_error": account.last_error,
+                "provider": account.provider,
+                "is_default": account.is_default,
+                "last_used_at": account.last_used_at,
+                "inbox_checked_at": account.inbox_checked_at,
+                "inbox_error": account.inbox_error,
+            }
+        )
+    return out
+
+
+@router.post("/smtp")
+def connect_smtp(payload: SmtpConnectIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    try:
+        account = store_smtp_account(
+            db,
+            user.id,
+            email_address=str(payload.email_address),
+            host=payload.host,
+            port=payload.port,
+            username=payload.username,
+            password=payload.password,
+            use_tls=payload.use_tls,
+            display_name=payload.display_name,
+        )
+    except GmailSendError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"id": account.id, "email_address": account.email_address, "status": account.status, "provider": "smtp"}
+
+
+@router.get("/gmail/connect")
+def connect_gmail(request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    require_google_oauth(db, user.id)
+    state = create_oauth_state_token(user.id)
+    redirect_uri = oauth_redirect_uri(request)
+    return {"authorization_url": build_authorization_url(db, user.id, state, redirect_uri), "redirect_uri": redirect_uri}
+
+
+@router.get("/gmail/callback")
+def gmail_callback(
+    request: Request,
+    code: str = "",
+    state: str = "",
+    error: str = "",
+    db: Session = Depends(get_db),
+):
+    settings = get_settings()
+    if error:
+        return RedirectResponse(f"{settings.frontend_url}/email-accounts?error={error}")
+    payload = try_decode_token(state)
+    if not payload or payload.get("sub") is None or payload.get("type") != "oauth_state":
+        return RedirectResponse(f"{settings.frontend_url}/email-accounts?error=invalid_state")
+    token_payload = exchange_code(db, payload["sub"], code, oauth_redirect_uri(request))
+    account = store_account(db, payload["sub"], token_payload)
+    write_audit(db, user_id=payload["sub"], action="gmail.connected", entity_type="email_account", entity_id=account.id)
+    db.commit()
+    return RedirectResponse(f"{settings.frontend_url}/email-accounts?connected={account.id}")
+
+
+@router.post("/{account_id}/disconnect")
+def disconnect(
+    account_id: str,
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    account = (
+        db.query(EmailAccount)
+        .filter(EmailAccount.id == account_id, EmailAccount.user_id == user.id)
+        .first()
+    )
+    if not account:
+        raise HTTPException(status_code=404, detail="Account not found")
+    account.status = "disconnected"
+    account.encrypted_credentials = ""
+    write_audit(
+        db,
+        user_id=user.id,
+        action="gmail.disconnected",
+        entity_type="email_account",
+        entity_id=account.id,
+        **get_client_meta(request),
+    )
+    db.commit()
+    return {"message": "Disconnected"}
+
+
+@router.post("/{account_id}/refresh")
+def refresh_account(
+    account_id: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    account = (
+        db.query(EmailAccount)
+        .filter(EmailAccount.id == account_id, EmailAccount.user_id == user.id)
+        .first()
+    )
+    if not account:
+        raise HTTPException(status_code=404, detail="Account not found")
+    if account.status == "disconnected" or not account.encrypted_credentials:
+        raise HTTPException(status_code=400, detail="Account is disconnected. Reconnect Gmail or SMTP.")
+    smtp = _smtp_payload(account)
+    if smtp:
+        try:
+            verify_smtp_login(
+                smtp.get("host") or "",
+                int(smtp.get("port") or 587),
+                smtp.get("username") or account.email_address,
+                smtp.get("password") or "",
+                bool(smtp.get("use_tls", True)),
+            )
+        except GmailSendError as exc:
+            account.status = "error"
+            account.last_error = str(exc)[:240]
+            db.commit()
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        account.status = "connected"
+        account.last_error = ""
+        db.commit()
+        return {"message": "SMTP connection verified", "status": account.status}
+    creds = _credentials_from_account(account)
+    persist_refreshed_credentials(db, account, creds)
+    db.commit()
+    return {"message": "Credentials refreshed", "status": account.status}
+
+
+@router.post("/{account_id}/default")
+def set_default_account(
+    account_id: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    account = (
+        db.query(EmailAccount)
+        .filter(EmailAccount.id == account_id, EmailAccount.user_id == user.id)
+        .first()
+    )
+    if not account:
+        raise HTTPException(status_code=404, detail="Account not found")
+    db.query(EmailAccount).filter(EmailAccount.user_id == user.id).update({"is_default": False})
+    account.is_default = True
+    db.commit()
+    return {"message": "Default sending account updated"}
+
+
+@router.post("/{account_id}/test")
+def test_email(
+    account_id: str,
+    request: Request,
+    to: str = Query(default=""),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    account = (
+        db.query(EmailAccount)
+        .filter(EmailAccount.id == account_id, EmailAccount.user_id == user.id)
+        .first()
+    )
+    if not account:
+        raise HTTPException(status_code=404, detail="Account not found")
+    recipient = to or user.email
+    html = "<p>This is a test email from Lead Generator.</p>"
+    try:
+        provider_id = send_gmail_message(
+            db, account, to=recipient, subject="Lead Generator test email", html_body=html, text_body="Test email"
+        )
+    except GmailSendError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    db.add(
+        EmailMessage(
+            user_id=user.id,
+            email_account_id=account.id,
+            recipient_email=recipient,
+            recipient_name=user.full_name,
+            subject="Lead Generator test email",
+            html_body=html,
+            text_body="Test email",
+            status="sent",
+            provider_message_id=provider_id,
+            sent_at=datetime.now(UTC),
+            is_test=True,
+        )
+    )
+    write_audit(
+        db,
+        user_id=user.id,
+        action="email.test_sent",
+        entity_type="email_account",
+        entity_id=account.id,
+        **get_client_meta(request),
+    )
+    db.commit()
+    return {"message": "Test email sent", "provider_message_id": provider_id}

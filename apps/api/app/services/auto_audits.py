@@ -1,0 +1,368 @@
+"""Automatic outreach poller, per scrape file.
+
+Each scrape file (ScrapingJob) has its own outreach switch: off / running / paused / stopped, a send mode (send
+automatically or keep for review) and its own daily limit. Every few minutes (Celery beat, or the in-process
+scheduler) and right after scraped leads are ready (`request_poll`), the poller looks at the files whose outreach is
+running and starts the normal audit workflow (screenshots -> Claude CRO review -> PDF -> email -> send) for leads of
+that file only, within that file's daily limit. Old files never run unless their outreach is started.
+
+Shared across files: the Claude capacity (AUTO_AUDIT_BATCH_SIZE audits at once) and the email account's own daily
+send limit (a safety cap for the mailbox). Failed audits are retried after a cooldown (AUTO_AUDIT_MAX_ATTEMPTS),
+failed sends a few times (AUTO_SEND_MAX_ATTEMPTS). Each lead is its own job, so one bad website never stops a file.
+"""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta
+
+from fastapi import HTTPException
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session
+
+from app.config import get_settings
+from app.logging_config import get_logger
+from app.models import Campaign, CampaignLead, EmailAccount, Lead, ScrapingJob, SuppressionEntry, WebsiteAudit
+from app.services.campaigns import (
+    CAMPAIGN_PAUSED_STEP,
+    CAMPAIGN_STOPPED_STEP,
+    OPEN_CAMPAIGN_LEAD_STATUSES,
+    OPEN_CAMPAIGN_STATUSES,
+    campaign_hold,
+)
+from app.services.integrations import ai_is_configured
+from app.services.website_audit import (
+    ACTIVE_STATUSES,
+    WAITING_FOR_LIMIT,
+    AuditSendError,
+    send_audit,
+    start_audit,
+)
+from app.utils.dates import local_day_start
+
+logger = get_logger("auto_audits")
+
+OUTREACH_STATUSES = ("off", "running", "paused", "stopped")
+
+
+def _today_start() -> datetime:
+    return local_day_start()  # the user's midnight, not UTC
+
+
+def candidate_leads_query(db: Session, user_id: str, job_id: str | None = None):
+    """Leads ready for an automatic audit: website + email, not audited yet (or a failed audit that may be retried),
+    never contacted, not suppressed, not waiting in a campaign. `job_id` limits it to one scrape file."""
+    app = get_settings()
+    # Any audit that didn't fail blocks the lead; failed ones block it during the cooldown and after the last attempt.
+    audited = select(WebsiteAudit.lead_id).where(WebsiteAudit.user_id == user_id, WebsiteAudit.status != "failed")
+    cooling = select(WebsiteAudit.lead_id).where(
+        WebsiteAudit.user_id == user_id,
+        WebsiteAudit.status == "failed",
+        WebsiteAudit.updated_at >= datetime.now(UTC) - timedelta(minutes=app.auto_audit_retry_minutes),
+    )
+    exhausted = (
+        select(WebsiteAudit.lead_id)
+        .where(WebsiteAudit.user_id == user_id, WebsiteAudit.status == "failed")
+        .group_by(WebsiteAudit.lead_id)
+        .having(func.count(WebsiteAudit.id) >= max(1, app.auto_audit_max_attempts))
+    )
+    # Leads queued in an open campaign are handled by that campaign (template or audit), never twice.
+    in_campaign = (
+        select(CampaignLead.lead_id)
+        .join(Campaign, Campaign.id == CampaignLead.campaign_id)
+        .where(
+            Campaign.user_id == user_id,
+            Campaign.status.in_(OPEN_CAMPAIGN_STATUSES),
+            CampaignLead.status.in_(OPEN_CAMPAIGN_LEAD_STATUSES),
+        )
+    )
+    suppressed = select(SuppressionEntry.email).where(SuppressionEntry.user_id == user_id)
+    query = db.query(Lead).filter(
+        Lead.user_id == user_id,
+        Lead.website_url != "",
+        Lead.primary_email != "",
+        Lead.do_not_contact.is_(False),
+        Lead.last_contacted_at.is_(None),
+        Lead.status != "processing",
+        Lead.source != "seed",  # demo sample businesses with fake websites
+        Lead.id.not_in(audited),
+        Lead.id.not_in(cooling),
+        Lead.id.not_in(exhausted),
+        Lead.id.not_in(in_campaign),
+        func.lower(Lead.primary_email).not_in(suppressed),
+    )
+    if job_id:
+        query = query.filter(Lead.scraping_job_id == job_id)
+    return query.order_by(Lead.created_at.asc())
+
+
+def outreach_issues(db: Session, user_id: str, auto_send: bool = True) -> list[str]:
+    """What stops automatic outreach from working at all (shown next to the outreach controls)."""
+    issues = []
+    if not ai_is_configured(db, user_id):
+        issues.append("AI is not set up: choose Claude Code in AI & settings.")
+    if auto_send:
+        connected = (
+            db.query(EmailAccount)
+            .filter(EmailAccount.user_id == user_id, EmailAccount.status == "connected")
+            .first()
+        )
+        if not connected:
+            issues.append("No connected email account: connect Gmail or SMTP in Email setup.")
+    return issues
+
+
+def _job_audits(db: Session, job: ScrapingJob):
+    return (
+        db.query(WebsiteAudit)
+        .join(Lead, Lead.id == WebsiteAudit.lead_id)
+        .filter(WebsiteAudit.user_id == job.user_id, WebsiteAudit.trigger == "auto", Lead.scraping_job_id == job.id)
+    )
+
+
+def job_outreach_status(db: Session, job: ScrapingJob) -> dict:
+    today = _today_start()
+    audits = _job_audits(db, job)
+    return {
+        "status": job.outreach_status,
+        "auto_send": job.outreach_auto_send,
+        "daily_limit": job.outreach_daily_limit,
+        # Failed audits don't use up the daily allowance (retries are capped by AUTO_AUDIT_MAX_ATTEMPTS).
+        "audits_today": audits.filter(WebsiteAudit.created_at >= today, WebsiteAudit.status != "failed").count(),
+        "sent_today": audits.filter(WebsiteAudit.sent_at >= today).count(),
+        "sent_total": audits.filter(WebsiteAudit.sent_at.isnot(None)).count(),
+        "running": audits.filter(WebsiteAudit.status.in_(ACTIVE_STATUSES)).count(),
+        "failed_today": audits.filter(
+            WebsiteAudit.created_at >= today, WebsiteAudit.status.in_(["failed", "send_failed"])
+        ).count(),
+        "waiting_leads": candidate_leads_query(db, job.user_id, job.id).count(),
+        "poll_seconds": get_settings().auto_audit_poll_seconds,
+    }
+
+
+def status_for_user(db: Session, user_id: str) -> dict:
+    """Account-wide outreach health (the per-file numbers come with each scrape file)."""
+    return {"issues": outreach_issues(db, user_id), "poll_seconds": get_settings().auto_audit_poll_seconds}
+
+
+# ---------------------------------------------------------------- holds (pause / stop)
+
+
+def outreach_hold(db: Session, audit: WebsiteAudit) -> str:
+    """"paused" / "stopped" when the audit's campaign or scrape file is paused or stopped, else ""."""
+    if audit.trigger == "campaign":
+        return campaign_hold(db, audit)
+    if audit.trigger != "auto":
+        return ""
+    status = (
+        db.query(ScrapingJob.outreach_status)
+        .join(Lead, Lead.scraping_job_id == ScrapingJob.id)
+        .filter(Lead.id == audit.lead_id)
+        .scalar()
+    )
+    return status if status in {"paused", "stopped"} else ""
+
+
+def set_job_outreach(
+    db: Session,
+    job: ScrapingJob,
+    *,
+    action: str,
+    auto_send: bool | None = None,
+    daily_limit: int | None = None,
+) -> ScrapingJob:
+    """start / pause / resume / stop / update one file's outreach."""
+    if auto_send is not None:
+        job.outreach_auto_send = auto_send
+    if daily_limit is not None:
+        job.outreach_daily_limit = max(1, min(int(daily_limit), 500))
+    if action in {"start", "resume"}:
+        job.outreach_status = "running"
+    elif action == "pause" and job.outreach_status == "running":
+        job.outreach_status = "paused"
+    elif action == "stop":
+        job.outreach_status = "stopped"
+        # Audits already running finish without sending; their drafts stay on the lead page.
+        for audit in _job_audits(db, job).filter(
+            WebsiteAudit.sent_at.is_(None),
+            WebsiteAudit.status.in_([*ACTIVE_STATUSES, "ready"]),
+        ):
+            audit.auto_send = False
+            if audit.status == "ready":
+                audit.step = CAMPAIGN_STOPPED_STEP
+    elif action != "update":
+        raise HTTPException(status_code=400, detail="Unknown outreach action")
+    db.commit()
+    db.refresh(job)
+    logger.info("file_outreach_changed", job_id=job.id, action=action, status=job.outreach_status)
+    if job.outreach_status == "running":
+        release_held_sends(db, job)
+        request_poll()
+    return job
+
+
+def release_held_sends(db: Session, job: ScrapingJob) -> int:
+    """After a resume: send the emails whose audits finished while the file's outreach was paused."""
+    held = _job_audits(db, job).filter(
+        WebsiteAudit.status == "ready", WebsiteAudit.sent_at.is_(None), WebsiteAudit.step == CAMPAIGN_PAUSED_STEP
+    ).all()
+    sent = 0
+    for audit in held:
+        if not audit.auto_send:
+            audit.step = "Ready to review and send"
+            db.commit()
+            continue
+        try:
+            send_audit(db, audit.user_id, audit.id)
+            sent += 1
+        except HTTPException as exc:
+            db.rollback()
+            if exc.status_code == 429:
+                audit = db.get(WebsiteAudit, audit.id)
+                audit.step = WAITING_FOR_LIMIT  # sent by send_waiting when the daily limit allows
+                db.commit()
+                break
+        except AuditSendError:
+            pass  # recorded on the audit (send_failed)
+    return sent
+
+
+# ---------------------------------------------------------------- polling
+
+
+def retry_failed_sends(db: Session, job: ScrapingJob) -> int:
+    """Re-send this file's automatic emails that failed to send (e.g. SMTP hiccup), a limited number of times."""
+    app = get_settings()
+    rows = (
+        _job_audits(db, job)
+        .filter(
+            WebsiteAudit.auto_send.is_(True),
+            WebsiteAudit.status == "send_failed",
+            WebsiteAudit.send_attempts < app.auto_send_max_attempts,
+            WebsiteAudit.updated_at <= datetime.now(UTC) - timedelta(minutes=10),
+        )
+        .limit(max(1, app.auto_audit_batch_size))
+        .all()
+    )
+    sent = 0
+    for audit in rows:
+        try:
+            send_audit(db, job.user_id, audit.id)
+            sent += 1
+        except AuditSendError:
+            pass  # recorded on the audit; retried next time until attempts run out
+        except HTTPException as exc:  # not retryable (suppressed, daily limit, missing PDF...)
+            db.rollback()
+            if exc.status_code == 429:
+                break
+            audit = db.get(WebsiteAudit, audit.id)
+            audit.send_attempts, audit.error_message = app.auto_send_max_attempts, str(exc.detail)
+            db.commit()
+    return sent
+
+
+def _running_audits(db: Session, user_id: str) -> int:
+    # All running audits (files, campaigns, manual) share the Claude capacity.
+    return db.query(WebsiteAudit).filter(WebsiteAudit.user_id == user_id, WebsiteAudit.status.in_(ACTIVE_STATUSES)).count()
+
+
+def poll_job(db: Session, job: ScrapingJob) -> int:
+    """Start automatic audits for one file, within its own daily limit. Returns how many were started."""
+    log = logger.bind(user_id=job.user_id, job_id=job.id)
+    issues = outreach_issues(db, job.user_id, job.outreach_auto_send)
+    if issues:
+        log.info("file_outreach_skipped", reasons=issues)
+        return 0
+    if job.outreach_auto_send:
+        retry_failed_sends(db, job)
+    today = _today_start()
+    used_today = _job_audits(db, job).filter(WebsiteAudit.created_at >= today, WebsiteAudit.status != "failed").count()
+    batch = max(1, get_settings().auto_audit_batch_size)
+    room = min(job.outreach_daily_limit - used_today, batch - _running_audits(db, job.user_id))
+    if room <= 0:
+        return 0
+    started = 0
+    for lead in candidate_leads_query(db, job.user_id, job.id).limit(room).all():
+        try:
+            start_audit(db, job.user_id, lead.id, auto_send=job.outreach_auto_send, trigger="auto")
+            started += 1
+        except HTTPException as exc:
+            db.rollback()
+            log.warning("auto_audit_start_failed", lead_id=lead.id, error=str(exc.detail))
+    if started:
+        log.info("auto_audits_started", count=started, used_today=used_today + started, limit=job.outreach_daily_limit)
+    return started
+
+
+def request_poll() -> None:
+    """Run the poller now instead of waiting for the next tick (e.g. scraped leads just became ready)."""
+    settings = get_settings()
+    if settings.inline_scheduler:
+        from app.services.scheduler import wake_poller
+
+        wake_poller()
+        return
+    try:
+        from app.services.scraping_jobs import broker_available
+
+        if broker_available():
+            from workers.tasks.audits import poll_auto_audits_task
+
+            poll_auto_audits_task.delay()
+    except Exception as exc:  # the regular tick still picks the leads up
+        logger.warning("auto_audit_poll_request_failed", error=str(exc))
+
+
+def send_waiting(db: Session) -> int:
+    """Send emails that were held back by the daily send limit, as soon as the limit allows (any trigger)."""
+    waiting = (
+        db.query(WebsiteAudit)
+        .filter(
+            WebsiteAudit.status == "ready",
+            WebsiteAudit.auto_send.is_(True),
+            WebsiteAudit.sent_at.is_(None),
+            WebsiteAudit.step == WAITING_FOR_LIMIT,
+        )
+        .order_by(WebsiteAudit.created_at.asc())
+        .limit(50)
+        .all()
+    )
+    sent, full = 0, set()
+    for audit in waiting:
+        if audit.email_account_id in full or outreach_hold(db, audit):
+            continue  # account at its limit today, or its file / campaign is paused or stopped
+        try:
+            send_audit(db, audit.user_id, audit.id)
+            sent += 1
+        except HTTPException as exc:
+            db.rollback()
+            if exc.status_code == 429:
+                full.add(audit.email_account_id)  # still at today's limit: try again tomorrow
+            else:
+                logger.warning("waiting_send_failed", audit_id=audit.id, error=str(exc.detail))
+        except AuditSendError:
+            pass  # recorded on the audit (send_failed)
+    if sent:
+        logger.info("waiting_emails_sent", count=sent)
+    return sent
+
+
+def poll_auto_audits(db: Session) -> dict:
+    try:
+        send_waiting(db)
+    except Exception as exc:  # never block the poller
+        db.rollback()
+        logger.error("send_waiting_failed", error=str(exc))
+    jobs = (
+        db.query(ScrapingJob)
+        .filter(ScrapingJob.outreach_status == "running")
+        .order_by(ScrapingJob.created_at.asc())
+        .all()
+    )
+    started = 0
+    for job in jobs:
+        try:
+            started += poll_job(db, job)
+        except Exception as exc:  # one file's problem must not stop the others
+            db.rollback()
+            logger.error("file_outreach_poll_failed", job_id=job.id, error=str(exc))
+    return {"files": len(jobs), "started": started}

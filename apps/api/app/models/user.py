@@ -1,0 +1,97 @@
+from datetime import datetime
+
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from app.database import Base
+from app.models.mixins import TimestampMixin, UUIDPrimaryKeyMixin
+
+
+class User(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    __tablename__ = "users"
+
+    email: Mapped[str] = mapped_column(String(320), unique=True, index=True, nullable=False)
+    hashed_password: Mapped[str] = mapped_column(String(255), nullable=False)
+    full_name: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    is_verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    role: Mapped[str] = mapped_column(String(32), default="owner", nullable=False)
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    settings: Mapped["UserSettings"] = relationship(
+        back_populates="user", uselist=False, cascade="all, delete-orphan"
+    )
+    services: Mapped[list["UserService"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
+
+
+class UserSettings(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    __tablename__ = "user_settings"
+
+    user_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False), ForeignKey("users.id", ondelete="CASCADE"), unique=True, nullable=False
+    )
+    sender_name: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    company_name: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    company_website: Mapped[str] = mapped_column(String(500), default="", nullable=False)
+    company_description: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    # Free things a cold email may offer (one per line); Claude picks the one that fits each site best
+    free_offers: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    # Adds the open-tracking image to sent emails (on by default)
+    track_opens: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    # Google Sheet of sites you built ("Anyone with the link"): one is referenced in every email by niche
+    portfolio_sheet_url: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    contact_email: Mapped[str] = mapped_column(String(320), default="", nullable=False)
+    contact_phone: Mapped[str] = mapped_column(String(64), default="", nullable=False)
+    default_signature: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    target_industries: Mapped[str] = mapped_column(Text, default="", nullable=False)
+
+    scrape_max_results: Mapped[int] = mapped_column(Integer, default=200, nullable=False)
+    crawl_max_pages: Mapped[int] = mapped_column(Integer, default=5, nullable=False)
+    crawl_timeout_seconds: Mapped[int] = mapped_column(Integer, default=20, nullable=False)
+    headless_browser: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+    ai_provider: Mapped[str] = mapped_column(String(64), default="openai", nullable=False)
+    ai_model: Mapped[str] = mapped_column(String(128), default="gpt-4o-mini", nullable=False)
+    ai_temperature: Mapped[float] = mapped_column(default=0.4, nullable=False)
+    ai_api_base: Mapped[str] = mapped_column(String(500), default="", nullable=False)
+    encrypted_ai_api_key: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    google_client_id: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    encrypted_google_client_secret: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    encrypted_apify_token: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    # Google Maps lead source: "scraper" (built-in, free) or "apify" (needs the token above)
+    scraper_provider: Mapped[str] = mapped_column(String(16), default="scraper", nullable=False)
+
+    default_daily_send_limit: Mapped[int] = mapped_column(Integer, default=50, nullable=False)
+    default_hourly_send_limit: Mapped[int] = mapped_column(Integer, default=20, nullable=False)
+    default_min_send_delay_seconds: Mapped[int] = mapped_column(Integer, default=60, nullable=False)
+    default_max_send_delay_seconds: Mapped[int] = mapped_column(Integer, default=180, nullable=False)
+
+    require_approval_before_sending: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    skip_previously_contacted: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    require_verified_emails: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    respect_suppression_list: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+    # Automatic audit poller: audits new leads and emails the report without manual steps
+    auto_audit_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    auto_audit_daily_limit: Mapped[int] = mapped_column(Integer, default=10, nullable=False)
+    auto_audit_send: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+    user: Mapped[User] = relationship(back_populates="settings")
+
+
+class UserService(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    __tablename__ = "user_services"
+    __table_args__ = (UniqueConstraint("user_id", "name", name="uq_user_service_name"),)
+
+    user_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False), ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+    user: Mapped[User] = relationship(back_populates="services")
