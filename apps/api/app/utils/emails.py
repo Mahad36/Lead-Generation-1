@@ -36,6 +36,20 @@ FALSE_POSITIVE_DOMAINS = {
     "gstatic.com",
     "cloudflare.com",
     "jquery.com",
+    # website-template placeholders
+    "mailservice.com",
+    "yourcompany.com",
+    "yourbusiness.com",
+    "yourwebsite.com",
+    "yoursite.net",
+    "sitename.com",
+    "domainname.com",
+    "companyname.com",
+    "emailaddress.com",
+    "yourmail.com",
+    "mydomain.com",
+    "mywebsite.com",
+    "mycompany.com",
 }
 
 FALSE_POSITIVE_LOCAL = {
@@ -57,6 +71,23 @@ FALSE_POSITIVE_LOCAL = {
     "no-reply",
     "donotreply",
     "mailer-daemon",
+    # website-template placeholders
+    "mymail",
+    "myemail",
+    "my.email",
+    "yourmail",
+    "your_email",
+    "youremailaddress",
+    "emailaddress",
+    "email.address",
+    "first.last",
+    "firstname.lastname",
+    "firstname",
+    "name.surname",
+    "someone",
+    "somebody",
+    "sample",
+    "demo",
 }
 
 EMAIL_RE = re.compile(
