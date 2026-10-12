@@ -78,7 +78,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   return (
     <div className="flex min-h-screen">
-      <aside className="hidden w-64 shrink-0 bg-sidebar text-sidebar-foreground md:block">
+      <aside className="hidden w-64 shrink-0 bg-sidebar text-sidebar-foreground md:sticky md:top-0 md:block md:h-screen md:self-start md:overflow-y-auto">
         <div className="px-5 py-6 text-lg font-semibold">Lead Generator</div>
         <nav className="space-y-1 px-3">
           {NAV.map((item) => {
