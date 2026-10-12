@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.deps import get_client_meta, get_current_user
-from app.models import User
+from app.models import Lead, User
 from app.schemas.audits import AuditDraftUpdate, AuditSendRequest, AuditStart, QuickAuditRequest
 from app.services import website_audit as audit_service
 
@@ -57,13 +57,29 @@ def start_audit(
 def list_audits(
     lead_id: str | None = Query(default=None),
     q: str | None = Query(default=None, max_length=200),
+    page: int | None = Query(default=None, ge=1),
+    page_size: int = Query(default=25, ge=1, le=200),
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    audits = audit_service.list_audits(db, user.id, lead_id, q=q)
+    """Audits, newest first. With `page`: {items, total, page, page_size} (Website audits page); else the latest 50."""
+    offset = (page - 1) * page_size if page else 0
+    audits = audit_service.list_audits(db, user.id, lead_id, q=q, limit=page_size if page else 50, offset=offset)
     for audit in audits:
         audit_service._expire_stale(db, audit)
-    return [audit_service.serialize_audit(a, full=False) for a in audits]
+    # Platform from the audit's own detection, else the lead's (from the website analysis)
+    lead_ids = {a.lead_id for a in audits if a.lead_id}
+    platforms = (
+        dict(db.query(Lead.id, Lead.platform).filter(Lead.id.in_(lead_ids)).all()) if lead_ids else {}
+    )
+    items = []
+    for a in audits:
+        data = audit_service.serialize_audit(a, full=False)
+        data["platform"] = data.get("platform") or platforms.get(a.lead_id) or ""
+        items.append(data)
+    if not page:
+        return items
+    return {"items": items, "total": audit_service.count_audits(db, user.id, lead_id, q=q), "page": page, "page_size": page_size}
 
 
 @router.get("/audits/auto-status")

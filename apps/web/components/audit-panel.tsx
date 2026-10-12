@@ -21,6 +21,7 @@ export type Audit = Tracking & {
   website_url: string;
   recipient_email: string;
   email_account_id: string | null;
+  platform?: string; // detected: Shopify, WordPress, Wix...
   auto_send: boolean;
   overall_score: number | null;
   headline: string;

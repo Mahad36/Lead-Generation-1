@@ -11,6 +11,14 @@ import Link from "next/link";
 import { FormEvent, useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
 
+const PAGE_SIZE = 25;
+
+/** "Unknown" / empty platforms show as a dash. */
+function platformLabel(platform?: string) {
+  const name = (platform || "").trim();
+  return !name || /^(unknown|none|custom\/unknown)$/i.test(name) ? "—" : name;
+}
+
 const EMPTY_FORM = { business_name: "", website_url: "", email: "", city: "", category: "", auto_send: false, email_account_id: "" };
 
 export default function WebsiteAuditsPage() {
@@ -21,13 +29,25 @@ export default function WebsiteAuditsPage() {
 
   const [query, setQuery] = useState("");
   const [search, setSearch] = useState(""); // what was last sent to the API (typing is debounced)
+  const [page, setPage] = useState(1);
+  const [total, setTotal] = useState(0);
   const loadList = useCallback(
-    () => api<Audit[]>(`/api/audits${search ? `?q=${encodeURIComponent(search)}` : ""}`).then(setAudits),
-    [search]
+    () =>
+      api<{ items: Audit[]; total: number }>(
+        `/api/audits?page=${page}&page_size=${PAGE_SIZE}${search ? `&q=${encodeURIComponent(search)}` : ""}`
+      ).then((data) => {
+        setAudits(data.items);
+        setTotal(data.total);
+      }),
+    [search, page]
   );
+  const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
   useEffect(() => {
-    const timer = setTimeout(() => setSearch(query.trim()), 300);
+    const timer = setTimeout(() => {
+      setSearch(query.trim());
+      setPage(1);
+    }, 300);
     return () => clearTimeout(timer);
   }, [query]);
 
@@ -158,6 +178,7 @@ export default function WebsiteAuditsPage() {
                 <tr>
                   <th className="py-2 pr-3">Website</th>
                   <th className="py-2 pr-3">Customer</th>
+                  <th className="py-2 pr-3">Platform</th>
                   <th className="py-2 pr-3">Status</th>
                   <th className="py-2 pr-3">Score</th>
                   <th className="py-2 pr-3">Started</th>
@@ -169,6 +190,7 @@ export default function WebsiteAuditsPage() {
                   <tr key={a.id} className="border-t border-border">
                     <td className="max-w-xs truncate py-2 pr-3">{a.website_url}</td>
                     <td className="py-2 pr-3">{a.recipient_email || "—"}</td>
+                    <td className="py-2 pr-3 whitespace-nowrap">{platformLabel(a.platform)}</td>
                     <td className="py-2 pr-3">
                       <span className="inline-flex flex-wrap gap-1">
                         <Badge tone={statusTone(a.status)}>{a.step}</Badge>
@@ -189,6 +211,22 @@ export default function WebsiteAuditsPage() {
                 ))}
               </tbody>
             </table>
+            <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-sm text-muted">
+              <span>
+                {(page - 1) * PAGE_SIZE + 1}–{Math.min(page * PAGE_SIZE, total)} of {total} audits
+              </span>
+              <div className="flex items-center gap-2">
+                <Button variant="secondary" disabled={page <= 1} onClick={() => setPage(page - 1)}>
+                  Previous
+                </Button>
+                <span>
+                  Page {page} of {pages}
+                </span>
+                <Button variant="secondary" disabled={page >= pages} onClick={() => setPage(page + 1)}>
+                  Next
+                </Button>
+              </div>
+            </div>
           </div>
         ) : (
           search ? (

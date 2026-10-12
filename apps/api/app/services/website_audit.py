@@ -121,8 +121,16 @@ def get_audit(db: Session, user_id: str, audit_id: str) -> WebsiteAudit:
 
 
 def list_audits(
-    db: Session, user_id: str, lead_id: str | None = None, limit: int = 50, q: str | None = None
+    db: Session, user_id: str, lead_id: str | None = None, limit: int = 50, q: str | None = None, offset: int = 0
 ) -> list[WebsiteAudit]:
+    return _audits_query(db, user_id, lead_id, q).order_by(WebsiteAudit.created_at.desc()).offset(offset).limit(limit).all()
+
+
+def count_audits(db: Session, user_id: str, lead_id: str | None = None, q: str | None = None) -> int:
+    return _audits_query(db, user_id, lead_id, q).count()
+
+
+def _audits_query(db: Session, user_id: str, lead_id: str | None, q: str | None):
     query = db.query(WebsiteAudit).filter(WebsiteAudit.user_id == user_id)
     if lead_id:
         query = query.filter(WebsiteAudit.lead_id == lead_id)
@@ -137,7 +145,7 @@ def list_audits(
                 Lead.primary_email.ilike(like),
             )
         )
-    return query.order_by(WebsiteAudit.created_at.desc()).limit(limit).all()
+    return query
 
 
 def _valid_email(value: str) -> str:
@@ -244,6 +252,7 @@ def serialize_audit(audit: WebsiteAudit, *, full: bool = True) -> dict:
         "website_url": audit.website_url,
         "recipient_email": audit.recipient_email,
         "email_account_id": audit.email_account_id,  # sends from this account (none: the default account)
+        "platform": (audit.site_data or {}).get("platform") or "",  # Shopify, WordPress, Wix... (detected)
         "auto_send": audit.auto_send,
         "trigger": audit.trigger,
         "overall_score": audit.overall_score,
