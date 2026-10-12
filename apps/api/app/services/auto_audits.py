@@ -268,24 +268,30 @@ def release_held_sends(db: Session, job: ScrapingJob) -> int:
 # ---------------------------------------------------------------- polling
 
 
-def retry_failed_sends(db: Session, job: ScrapingJob) -> int:
-    """Re-send this file's automatic emails that failed to send (e.g. SMTP hiccup), a limited number of times."""
+def retry_failed_sends(db: Session) -> int:
+    """Re-send automatic emails that failed to send (e.g. Gmail's "421 server busy"), a limited number of times.
+
+    Covers scrape files, campaigns and manual audits set to send automatically; paused / stopped ones wait.
+    """
     app = get_settings()
     rows = (
-        _job_audits(db, job)
+        db.query(WebsiteAudit)
         .filter(
             WebsiteAudit.auto_send.is_(True),
             WebsiteAudit.status == "send_failed",
             WebsiteAudit.send_attempts < app.auto_send_max_attempts,
             WebsiteAudit.updated_at <= datetime.now(UTC) - timedelta(minutes=10),
         )
-        .limit(max(1, app.auto_audit_batch_size))
+        .order_by(WebsiteAudit.updated_at.asc())
+        .limit(5)
         .all()
     )
     sent = 0
     for audit in rows:
+        if outreach_hold(db, audit):
+            continue
         try:
-            send_audit(db, job.user_id, audit.id)
+            send_audit(db, audit.user_id, audit.id)
             sent += 1
         except AuditSendError:
             pass  # recorded on the audit; retried next time until attempts run out
@@ -311,8 +317,6 @@ def poll_job(db: Session, job: ScrapingJob) -> int:
     if issues:
         log.info("file_outreach_skipped", reasons=issues)
         return 0
-    if job.outreach_auto_send:
-        retry_failed_sends(db, job)
     today = _today_start()
     used_today = _job_audits(db, job).filter(WebsiteAudit.created_at >= today, WebsiteAudit.status != "failed").count()
     batch = max(1, get_settings().auto_audit_batch_size)
@@ -413,6 +417,7 @@ def send_waiting(db: Session) -> int:
 def poll_auto_audits(db: Session) -> dict:
     try:
         send_waiting(db)
+        retry_failed_sends(db)
     except Exception as exc:  # never block the poller
         db.rollback()
         logger.error("send_waiting_failed", error=str(exc))

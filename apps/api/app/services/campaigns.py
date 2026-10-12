@@ -21,7 +21,7 @@ from app.models import (
 from app.schemas.campaigns import CampaignCreate
 from app.services.ai import AINotConfiguredError, generate_personalized_email
 from app.services.audit import write_audit
-from app.services.deliverability import address_problem, pick_sending_account
+from app.services.deliverability import MIN_SEND_GAP_SECONDS, address_problem, pick_sending_account, sent_recently
 from app.services.gmail import GmailSendError, daily_limit_reached, send_gmail_message
 from app.services.limits import LimitValidationError, validate_send_limits
 from app.services.suppression import is_suppressed
@@ -736,6 +736,14 @@ def send_claimed_lead(db: Session, campaign_lead: CampaignLead) -> str:
         campaign_lead.locked_by = ""
         db.commit()
         return "inbox_paused"
+    if sent_recently(db, account):
+        # Another email just left this inbox (audit, follow-up, other campaign): wait a little
+        campaign.next_eligible_at = datetime.now(UTC) + timedelta(seconds=MIN_SEND_GAP_SECONDS)
+        campaign_lead.status = "queued"
+        campaign_lead.locked_at = None
+        campaign_lead.locked_by = ""
+        db.commit()
+        return "spacing"
     problem = address_problem(db, campaign.user_id, lead.primary_email)
     if problem:
         campaign_lead.status = "skipped"

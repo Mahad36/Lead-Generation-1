@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.logging_config import get_logger
 from app.models import Campaign, EmailAccount, EmailMessage, Lead, ScrapingJob, UserSettings, WebsiteAudit
-from app.services.deliverability import account_ready, in_send_window
+from app.services.deliverability import account_ready, in_send_window, sent_recently
 from app.services.gmail import GmailSendError, daily_limit_reached, send_gmail_message
 from app.services.suppression import is_suppressed
 from app.utils.signature import append_signature
@@ -341,7 +341,7 @@ def run_followups(db: Session) -> dict:
             waiting += 1
             continue
         account = db.get(EmailAccount, root.email_account_id)
-        if not account_ready(account) or daily_limit_reached(db, account):
+        if not account_ready(account) or daily_limit_reached(db, account) or sent_recently(db, account):
             waiting += 1  # same inbox as the first email keeps the thread together: wait for it
             continue
         try:

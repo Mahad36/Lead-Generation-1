@@ -34,7 +34,7 @@ from app.services.audit import write_audit
 from app.services.audit_ai import generate_audit_email, generate_audit_report
 from app.services.audit_pdf import build_audit_pdf, pdf_filename
 from app.services.crawler import crawl_website
-from app.services.deliverability import WAITING_FOR_INBOX, WAITING_FOR_WINDOW
+from app.services.deliverability import WAITING_FOR_INBOX, WAITING_FOR_SPACING, WAITING_FOR_WINDOW
 from app.services.gmail import EmailAttachment, GmailSendError, daily_limit_reached, send_gmail_message
 from app.services.integrations import resolve_ai_config
 from app.services.performance import PerformanceBlockedError, PerformanceError, measure_performance
@@ -68,7 +68,7 @@ STEP_LABELS = {
 ACTIVE_STATUSES = {"queued", *STEPS, "sending"}
 WAITING_FOR_LIMIT = "Waiting: daily send limit reached (sends automatically when allowed)"
 # Every reason an automatic send waits; auto_audits.send_waiting retries them all
-WAITING_STEPS = (WAITING_FOR_LIMIT, WAITING_FOR_WINDOW, WAITING_FOR_INBOX)
+WAITING_STEPS = (WAITING_FOR_LIMIT, WAITING_FOR_WINDOW, WAITING_FOR_INBOX, WAITING_FOR_SPACING)
 SENDABLE_STATUSES = {"ready", "send_failed", "sent"}
 STALE_AFTER = timedelta(minutes=20)
 
@@ -832,6 +832,8 @@ def send_audit(
     )
     if daily_limit_reached(db, account):
         raise deliverability.limit_reached_error(account)
+    if not manual:
+        deliverability.require_send_gap(db, account)  # avoid Gmail's "421 server busy" from back-to-back sends
 
     unsubscribe = unsubscribe_url(user_id, recipient)
     rfc_message_id = new_rfc_message_id(account.email_address)

@@ -412,11 +412,29 @@ def send_smtp_message(
         db.commit()
         return f"smtp:{datetime.now(UTC).timestamp()}"
     except Exception as exc:
-        account.last_error = str(exc)[:240]
+        message = _smtp_error_text(exc)
+        account.last_error = message[:240]
         db.add(account)
         db.commit()
         logger.error("smtp_send_failed", account_id=account.id, error=str(exc))
-        raise GmailSendError(str(exc)[:240], retryable=True) from exc
+        raise GmailSendError(message[:240], retryable=True) from exc
+
+
+def _smtp_error_text(exc: Exception) -> str:
+    """A readable reason instead of the raw SMTP tuple (e.g. Gmail's "421 4.4.5 Server busy")."""
+    import smtplib
+
+    code = getattr(exc, "smtp_code", None)
+    if isinstance(exc, smtplib.SMTPResponseException) and code and 400 <= code < 500:
+        return (
+            f"Gmail was busy and asked to try again later (temporary, code {code}). "
+            "Automatic emails are retried in about 10 minutes."
+        )
+    if isinstance(exc, smtplib.SMTPAuthenticationError):
+        return "Gmail rejected the login. Replace the App Password in Email setup."
+    if isinstance(exc, smtplib.SMTPRecipientsRefused):
+        return "Gmail refused the recipient address."
+    return str(exc)
 
 
 def sender_header(account: EmailAccount) -> str:

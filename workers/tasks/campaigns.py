@@ -179,6 +179,10 @@ def process_campaign_queue(campaign_id: str) -> dict:
             _continue_queue(campaign_id, delay)
         elif result == "hourly_limit":
             _continue_queue(campaign_id, 3600)
+        elif result == "spacing":
+            from app.services.deliverability import MIN_SEND_GAP_SECONDS
+
+            _continue_queue(campaign_id, MIN_SEND_GAP_SECONDS + 5)
         elif result == "daily_limit":
             from app.utils.dates import seconds_until_local_midnight
 

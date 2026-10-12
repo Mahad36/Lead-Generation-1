@@ -117,3 +117,18 @@ def test_working_day_reset_hour(monkeypatch):
     finally:
         dates.set_day_start_hour(0)
     assert dates.local_day_start().strftime("%a %H:%M") == "Sat 00:00"
+
+
+def test_automatic_sends_are_spaced_out(monkeypatch):
+    import pytest
+
+    account = SimpleNamespace(email_address="me@gmail.com")
+    monkeypatch.setattr(deliverability, "seconds_since_last_send", lambda db, a: 30)
+    assert deliverability.sent_recently(None, account)
+    with pytest.raises(SendDeferred) as caught:
+        deliverability.require_send_gap(None, account)
+    assert caught.value.step == deliverability.WAITING_FOR_SPACING
+    monkeypatch.setattr(deliverability, "seconds_since_last_send", lambda db, a: 300)
+    deliverability.require_send_gap(None, account)  # long enough: no wait
+    monkeypatch.setattr(deliverability, "seconds_since_last_send", lambda db, a: None)
+    assert not deliverability.sent_recently(None, account)  # never sent

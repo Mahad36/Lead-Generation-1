@@ -18,6 +18,7 @@ import urllib.request
 from datetime import UTC, date, datetime, timedelta
 
 from fastapi import HTTPException
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.logging_config import get_logger
@@ -34,6 +35,10 @@ BOUNCE_PAUSE_RATE = 0.05  # pause above 5% bounces
 
 WAITING_FOR_WINDOW = "Waiting: outside sending hours (sends automatically when they start)"
 WAITING_FOR_INBOX = "Waiting: the sending inbox is paused (too many bounces). Resume it in Email setup."
+WAITING_FOR_SPACING = "Waiting: spacing emails out (sends in a few minutes)"
+
+# Gmail answers "421 4.4.5 Server busy" when one inbox sends emails (especially with attachments) seconds apart.
+MIN_SEND_GAP_SECONDS = 120
 
 
 class SendDeferred(HTTPException):
@@ -92,6 +97,29 @@ def pick_sending_account(db: Session, user_id: str) -> EmailAccount | None:
         return None
     ranked = sorted(accounts, key=lambda a: (remaining_today(db, a), a.is_default), reverse=True)
     return ranked[0]
+
+
+# ---------------------------------------------------------------- spacing between emails
+
+
+def seconds_since_last_send(db: Session, account: EmailAccount) -> float | None:
+    last = db.query(func.max(EmailMessage.sent_at)).filter(EmailMessage.email_account_id == account.id).scalar()
+    return (datetime.now(UTC) - last).total_seconds() if last else None
+
+
+def sent_recently(db: Session, account: EmailAccount) -> bool:
+    """This inbox sent less than MIN_SEND_GAP_SECONDS ago: automatic emails wait a little."""
+    since = seconds_since_last_send(db, account)
+    return since is not None and since < MIN_SEND_GAP_SECONDS
+
+
+def require_send_gap(db: Session, account: EmailAccount) -> None:
+    if sent_recently(db, account):
+        raise SendDeferred(
+            f"{account.email_address} sent an email under {MIN_SEND_GAP_SECONDS // 60} minutes ago; "
+            "this one goes out in a few minutes.",
+            WAITING_FOR_SPACING,
+        )
 
 
 # ---------------------------------------------------------------- bounce auto-pause
