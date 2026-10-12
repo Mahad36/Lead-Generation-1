@@ -13,6 +13,7 @@ clients -> testimonials -> thank you.
 from __future__ import annotations
 
 import io
+import re
 from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
@@ -520,6 +521,9 @@ def build_audit_pdf(
     url = performance.get("url") or lead.get("website_url") or ""
     domain = _clean(extract_domain(url) or url)
     company = _clean(sender.get("company_name") or "Bee Creative")
+    # Your website (AI & settings -> Company website), shown under "Presented by" on the cover
+    company_url = (sender.get("company_website") or "").strip()
+    company_site = re.sub(r"^https?://(www\.)?", "", company_url).rstrip("/")
     contact = _clean(sender.get("contact_email") or "")
     overall = report.get("overall_score")
     offer = report.get("free_offer") or {}
@@ -557,6 +561,12 @@ def build_audit_pdf(
         canvas.drawString(62, 90, business.upper())
         canvas.setFont(f["black"], 19)
         canvas.drawString(296, 90, company)
+        if company_site:
+            canvas.setFont(f["body"], 12)
+            canvas.drawString(296, 70, company_site[:40])
+            width = canvas.stringWidth(company_site[:40], f["body"], 12)
+            href = company_url if company_url.startswith("http") else f"https://{company_url}"
+            canvas.linkURL(href, (296, 66, 296 + width, 82), relative=0)  # clickable in the PDF
         canvas.restoreState()
 
     def static_page(name):
