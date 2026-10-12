@@ -1,6 +1,7 @@
 """In-process scheduler for running without Redis/Celery (e.g. directly on Windows).
 
-Runs the automatic audit poller and the reply/bounce inbox checker in background threads of the API process. Audits it starts run in
+Runs the automatic audit poller, the reply/bounce inbox checker and the deliverability round (follow-ups, warm-up)
+in background threads of the API process. Audits it starts run in
 threads too (see scraping_jobs.enqueue_task), so no broker or worker process is needed.
 """
 
@@ -55,6 +56,34 @@ def _inbox_loop() -> None:
             db.close()
 
 
+DELIVERABILITY_SECONDS = 300
+
+
+def deliverability_round() -> dict:
+    """Follow-ups that are due, then warm-up between your inboxes. Each part survives the other failing."""
+    from app.database import get_session
+    from app.services.followups import run_followups
+    from app.services.warmup import run_warmup
+
+    result = {}
+    for name, job in (("followups", run_followups), ("warmup", run_warmup)):
+        db = get_session()
+        try:
+            result[name] = job(db)
+        except Exception as exc:
+            db.rollback()
+            logger.error(f"{name}_round_failed", error=str(exc)[:300])
+        finally:
+            db.close()
+    return result
+
+
+def _deliverability_loop() -> None:
+    logger.info("deliverability_loop_started", every_seconds=DELIVERABILITY_SECONDS)
+    while not _stop.wait(DELIVERABILITY_SECONDS):
+        deliverability_round()
+
+
 def start_inline_scheduler() -> None:
     global _started
     if _started or not get_settings().inline_scheduler:
@@ -63,6 +92,7 @@ def start_inline_scheduler() -> None:
     threading.Thread(target=_loop, name="auto-audit-poller", daemon=True).start()
     if get_settings().inbox_check_seconds > 0:
         threading.Thread(target=_inbox_loop, name="inbox-checker", daemon=True).start()
+    threading.Thread(target=_deliverability_loop, name="followups-warmup", daemon=True).start()
 
 
 def wake_poller() -> None:

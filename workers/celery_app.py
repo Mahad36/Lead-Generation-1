@@ -58,6 +58,10 @@ celery_app.conf.update(
             "task": "workers.tasks.audits.check_inboxes",
             "schedule": float(max(60, settings.inbox_check_seconds)),
         },
+        "deliverability-round": {
+            "task": "workers.tasks.audits.deliverability_round",
+            "schedule": 300.0,
+        },
         "cleanup-jobs": {
             "task": "workers.tasks.maintenance.cleanup_jobs",
             "schedule": crontab(minute=20, hour=3),

@@ -107,24 +107,6 @@ OPT_OUT_RE = re.compile(
 QUOTE_START_RE = re.compile(r"^(?:On .+ wrote:|-----Original Message-----|From: .+)$", re.M)
 
 
-AUTO_SUBJECT_RE = re.compile(
-    r"^(?:automatic reply|auto[- ]?reply|autoreply|auto:|out of (?:the )?office|abwesenheitsnotiz|r[ée]ponse automatique)",
-    re.I,
-)
-
-
-def _is_auto_reply(msg: email.message.Message) -> bool:
-    """Out-of-office and "thanks, we'll get back to you" robots (RFC 3834 headers, or the usual subjects)."""
-    auto = (msg.get("Auto-Submitted") or "").strip().lower()
-    if auto and auto != "no":
-        return True
-    if msg.get("X-Autoreply") or msg.get("X-Autorespond"):
-        return True
-    if (msg.get("Precedence") or "").strip().lower() == "auto_reply":
-        return True
-    return bool(AUTO_SUBJECT_RE.match(_decoded(msg.get("Subject")).strip()))
-
-
 def _html_to_text(html: str) -> str:
     html = re.sub(r"(?is)<(script|style|head)\b.*?</\1>", "", html)
     html = re.sub(r"(?i)<br\s*/?>", "\n", html)
@@ -218,6 +200,7 @@ def check_account(db: Session, account: EmailAccount) -> dict:
             EmailMessage.rfc_message_id != "",
             EmailMessage.sent_at >= since,
             EmailMessage.is_test.is_(False),
+            EmailMessage.followup_of_id.is_(None),  # follow-ups belong to their first email's conversation
         )
         if m.id not in answers and not m.bounced_at
     ]
@@ -230,8 +213,7 @@ def check_account(db: Session, account: EmailAccount) -> dict:
     own = normalize_email(account.email_address)
     oldest = min(m.sent_at for m in roots)
     fields = (
-        "BODY.PEEK[HEADER.FIELDS (FROM TO DATE SUBJECT MESSAGE-ID IN-REPLY-TO REFERENCES CONTENT-TYPE "
-        "AUTO-SUBMITTED X-AUTOREPLY X-AUTORESPOND PRECEDENCE)]"
+        "BODY.PEEK[HEADER.FIELDS (FROM TO DATE SUBJECT MESSAGE-ID IN-REPLY-TO REFERENCES CONTENT-TYPE)]"
     )
 
     replies = bounces = opt_outs = answers_from_gmail = 0
@@ -272,22 +254,25 @@ def check_account(db: Session, account: EmailAccount) -> dict:
                 root = earlier[-1] if earlier else None
             if root is None:
                 continue
-            # An automatic reply is kept in the conversation (marked as such) but is not a reply: the lead stays
-            # "sent", nothing goes to Replies, and its wording ("we don't respond to...") is never an opt-out.
-            auto = _is_auto_reply(msg)
-            if not auto and not root.replied_at:
+            if not root.replied_at:
                 _mark_replied(db, root, when, sender)
                 replies += 1
             full = _fetch(imap, [uid], "BODY.PEEK[]")
             text = _reply_text(full[0][1]) if full else ""
             rfc = (msg.get("Message-ID") or "").strip() or f"<inbox-{account.id}-{uidvalidity}-{uid}@leadgen>"
-            if add_message(db, root, direction="in", source="auto" if auto else "inbox", from_email=sender,
-                           to_email=own, subject=_decoded(msg.get("Subject")), body_text=text,
-                           rfc_message_id=rfc, occurred_at=when):
+            if add_message(db, root, direction="in", source="inbox", from_email=sender, to_email=own,
+                           subject=_decoded(msg.get("Subject")), body_text=text, rfc_message_id=rfc, occurred_at=when):
                 index[rfc] = root
-            if not auto and _honour_opt_out(db, root, text):
+            if _honour_opt_out(db, root, text):
                 opt_outs += 1
         account.inbox_uidvalidity = uidvalidity
+        if bounces:
+            from app.services.deliverability import check_bounce_rate
+
+            try:
+                check_bounce_rate(db, account)  # too many bounces: pause this inbox until you resume it
+            except Exception as exc:  # never let the pause check break reply / bounce detection
+                logger.warning("bounce_rate_check_failed", account_id=account.id, error=str(exc)[:200])
         if uids:
             account.inbox_last_uid = max(uids[-1], account.inbox_last_uid or 0)
         elif account.inbox_last_uid is None:

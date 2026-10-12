@@ -29,6 +29,10 @@ class CampaignCreate(BaseModel):
     # "audit": analyse each lead's website -> PDF audit -> Claude email written from the findings -> send with PDF.
     # "template": one subject/body for every lead (with an optional AI paragraph), no website analysis.
     outreach_mode: Literal["audit", "template"] = "template"
+    # Add the signature from Settings under each email (audit emails, and template emails without {{signature}}).
+    add_signature: bool = True
+    # Follow-ups (AI & settings -> Sending) after each first email of this campaign
+    followups: bool = True
 
     @model_validator(mode="after")
     def require_leads_or_import(self):

@@ -9,7 +9,7 @@ import { toast } from "sonner";
 const VARS = [
   "business_name", "city", "country", "category", "website", "platform", "website_score",
   "lead_score", "website_analysis", "website_issue", "recommended_service", "personalized_message",
-  "sender_name", "sender_company", "sender_website", "unsubscribe_url",
+  "sender_name", "sender_company", "sender_website", "signature", "unsubscribe_url",
 ];
 
 export function TemplateEditor({ id }: { id?: string }) {

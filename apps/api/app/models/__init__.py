@@ -9,6 +9,7 @@ from app.models.email import (
     PasswordResetToken,
     RefreshToken,
     SuppressionEntry,
+    WarmupMessage,
 )
 from app.models.lead import Lead, LeadEmail, LeadImport, LeadPhone
 from app.models.scraping import ScrapingJob, ScrapingSearch
@@ -39,6 +40,7 @@ __all__ = [
     "UserSettings",
     "Website",
     "WebsiteAnalysis",
+    "WarmupMessage",
     "WebsiteAudit",
     "WebsiteTechnology",
 ]

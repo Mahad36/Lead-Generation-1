@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 
 from app.models import EmailTemplate, Lead, UserSettings, WebsiteAnalysis
 from app.schemas.templates import TemplateCreate, TemplateUpdate
+from app.utils.signature import signature_html, signature_text
 from app.utils.templates import render_template, validate_template_variables
 
 
@@ -99,6 +100,12 @@ def delete_template(db: Session, user_id: str, template_id: str) -> None:
     db.commit()
 
 
+def text_context(context: dict, db: Session, user_id: str) -> dict:
+    """The same values for a plain-text body: the signature as text lines, not HTML."""
+    settings = db.query(UserSettings).filter(UserSettings.user_id == user_id).first()
+    return {**context, "signature": signature_text(settings.default_signature if settings else "")}
+
+
 def build_template_context(db: Session, user_id: str, lead: Lead | None) -> dict:
     settings = db.query(UserSettings).filter(UserSettings.user_id == user_id).first()
     analysis = None
@@ -130,6 +137,7 @@ def build_template_context(db: Session, user_id: str, lead: Lead | None) -> dict
         "sender_name": settings.sender_name if settings else "",
         "sender_company": settings.company_name if settings else "",
         "sender_website": settings.company_website if settings else "",
+        "signature": signature_html(settings.default_signature if settings else ""),  # plain text in text bodies
         "unsubscribe_url": "{{unsubscribe_url}}",
     }
 
@@ -150,6 +158,6 @@ def preview_template(
     return {
         "subject": render_template(subject_s, context),
         "html_body": render_template(html_s, context),
-        "text_body": render_template(text_s, context),
+        "text_body": render_template(text_s, text_context(context, db, user_id)),
         "context": context,
     }

@@ -33,10 +33,12 @@ from app.services.integrations import ai_is_configured
 from app.services.website_audit import (
     ACTIVE_STATUSES,
     WAITING_FOR_LIMIT,
+    WAITING_STEPS,
     AuditSendError,
     send_audit,
     start_audit,
 )
+from app.services.deliverability import WAITING_FOR_WINDOW, address_problem, waiting_step
 from app.utils.dates import local_day_start
 
 logger = get_logger("auto_audits")
@@ -84,6 +86,7 @@ def candidate_leads_query(db: Session, user_id: str, job_id: str | None = None):
         Lead.last_contacted_at.is_(None),
         Lead.status != "processing",
         Lead.source != "seed",  # demo sample businesses with fake websites
+        Lead.email_status != "undeliverable",  # its email domain can't receive mail
         Lead.id.not_in(audited),
         Lead.id.not_in(cooling),
         Lead.id.not_in(exhausted),
@@ -122,8 +125,18 @@ def _job_audits(db: Session, job: ScrapingJob):
 def job_outreach_status(db: Session, job: ScrapingJob) -> dict:
     today = _today_start()
     audits = _job_audits(db, job)
+    account = db.get(EmailAccount, job.outreach_email_account_id) if job.outreach_email_account_id else None
     return {
         "status": job.outreach_status,
+        # Sends from this account; none chosen = your default account
+        "email_account_id": account.id if account else None,
+        "email_account": account.email_address if account else "",
+        "email_account_issue": (
+            f"{account.email_address} is not connected, so your default account sends instead. "
+            "Reconnect it in Email setup or choose another."
+            if account and account.status != "connected"
+            else ""
+        ),
         "auto_send": job.outreach_auto_send,
         "daily_limit": job.outreach_daily_limit,
         # Failed audits don't use up the daily allowance (retries are capped by AUTO_AUDIT_MAX_ATTEMPTS).
@@ -162,6 +175,29 @@ def outreach_hold(db: Session, audit: WebsiteAudit) -> str:
     return status if status in {"paused", "stopped"} else ""
 
 
+def own_email_account_id(db: Session, user_id: str, account_id: str | None) -> str | None:
+    """The id of one of this user's email accounts, or None for "my default account"."""
+    if not account_id:
+        return None
+    account = (
+        db.query(EmailAccount).filter(EmailAccount.id == account_id, EmailAccount.user_id == user_id).first()
+    )
+    if not account:
+        raise HTTPException(status_code=404, detail="Email account not found")
+    return account.id
+
+
+def _sending_account_id(db: Session, job: ScrapingJob) -> str | None:
+    """The file's chosen account while it is connected; otherwise None (the default account sends)."""
+    if not job.outreach_email_account_id:
+        return None
+    account = db.get(EmailAccount, job.outreach_email_account_id)
+    if account and account.status == "connected":
+        return account.id
+    logger.warning("file_outreach_account_unavailable", job_id=job.id, account_id=job.outreach_email_account_id)
+    return None
+
+
 def set_job_outreach(
     db: Session,
     job: ScrapingJob,
@@ -169,8 +205,11 @@ def set_job_outreach(
     action: str,
     auto_send: bool | None = None,
     daily_limit: int | None = None,
+    email_account_id=...,  # an account id, "" / None for your default account, ... to leave it unchanged
 ) -> ScrapingJob:
     """start / pause / resume / stop / update one file's outreach."""
+    if email_account_id is not ...:
+        job.outreach_email_account_id = own_email_account_id(db, job.user_id, email_account_id)
     if auto_send is not None:
         job.outreach_auto_send = auto_send
     if daily_limit is not None:
@@ -218,7 +257,7 @@ def release_held_sends(db: Session, job: ScrapingJob) -> int:
             db.rollback()
             if exc.status_code == 429:
                 audit = db.get(WebsiteAudit, audit.id)
-                audit.step = WAITING_FOR_LIMIT  # sent by send_waiting when the daily limit allows
+                audit.step = waiting_step(exc, WAITING_FOR_LIMIT)  # send_waiting sends it when allowed
                 db.commit()
                 break
         except AuditSendError:
@@ -282,8 +321,23 @@ def poll_job(db: Session, job: ScrapingJob) -> int:
         return 0
     started = 0
     for lead in candidate_leads_query(db, job.user_id, job.id).limit(room).all():
+        problem = address_problem(db, job.user_id, lead.primary_email)
+        if problem:
+            # Don't spend an audit on an email that would bounce
+            lead.email_status = "undeliverable"
+            lead.notes = (lead.notes + "\n" if lead.notes else "") + problem
+            db.commit()
+            log.info("auto_audit_skipped_undeliverable", lead_id=lead.id)
+            continue
         try:
-            start_audit(db, job.user_id, lead.id, auto_send=job.outreach_auto_send, trigger="auto")
+            start_audit(
+                db,
+                job.user_id,
+                lead.id,
+                auto_send=job.outreach_auto_send,
+                email_account_id=_sending_account_id(db, job),
+                trigger="auto",
+            )
             started += 1
         except HTTPException as exc:
             db.rollback()
@@ -320,23 +374,33 @@ def send_waiting(db: Session) -> int:
             WebsiteAudit.status == "ready",
             WebsiteAudit.auto_send.is_(True),
             WebsiteAudit.sent_at.is_(None),
-            WebsiteAudit.step == WAITING_FOR_LIMIT,
+            WebsiteAudit.step.in_(WAITING_STEPS),
         )
         .order_by(WebsiteAudit.created_at.asc())
         .limit(50)
         .all()
     )
-    sent, full = 0, set()
+    sent, full, closed, used = 0, set(), set(), set()
     for audit in waiting:
-        if audit.email_account_id in full or outreach_hold(db, audit):
-            continue  # account at its limit today, or its file / campaign is paused or stopped
+        if audit.email_account_id and audit.email_account_id in used:
+            continue  # one held email per inbox per round, so a backlog doesn't go out in one burst
+        if audit.user_id in closed or audit.email_account_id in full or outreach_hold(db, audit):
+            continue  # outside sending hours, inbox full today, or its file / campaign is paused or stopped
         try:
-            send_audit(db, audit.user_id, audit.id)
+            sent_audit = send_audit(db, audit.user_id, audit.id)
             sent += 1
+            used.add(sent_audit.email_account_id)
         except HTTPException as exc:
             db.rollback()
             if exc.status_code == 429:
-                full.add(audit.email_account_id)  # still at today's limit: try again tomorrow
+                if getattr(exc, "step", "") == WAITING_FOR_WINDOW:
+                    closed.add(audit.user_id)  # nothing of this user's sends until the hours start
+                else:
+                    full.add(audit.email_account_id)  # still at today's limit (or paused): try again later
+                held = db.get(WebsiteAudit, audit.id)
+                if held and held.step != waiting_step(exc, held.step):
+                    held.step = waiting_step(exc, held.step)  # show the current reason
+                    db.commit()
             else:
                 logger.warning("waiting_send_failed", audit_id=audit.id, error=str(exc.detail))
         except AuditSendError:

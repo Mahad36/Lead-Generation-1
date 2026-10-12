@@ -1,5 +1,6 @@
 "use client";
 
+import { automaticLabel, useEmailAccounts } from "@/components/send-from";
 import { Badge, Button, Input } from "@/components/ui";
 import { api } from "@/lib/api";
 import { useEffect, useState } from "react";
@@ -17,6 +18,10 @@ export type FileOutreach = {
   failed_today: number;
   waiting_leads: number;
   poll_seconds: number;
+  // The account this file sends from (null = your default account)
+  email_account_id: string | null;
+  email_account: string;
+  email_account_issue: string;
 };
 
 export type OutreachMode = "auto" | "review" | "off";
@@ -105,6 +110,7 @@ export function FileOutreachControls({
   const [confirmStop, setConfirmStop] = useState(false);
   // What is being typed in the daily-limit box; null = show the saved limit.
   const [draft, setDraft] = useState<string | null>(null);
+  const accounts = useEmailAccounts();
 
   if (!outreach) return null;
   const limit = draft ?? String(outreach.daily_limit);
@@ -160,6 +166,30 @@ export function FileOutreachControls({
           />
         </label>
       ) : null}
+      <label className="flex items-center gap-1 text-xs text-muted">
+        from
+        <select
+          className="h-7 max-w-[220px] rounded-md border border-border bg-card px-2 text-xs text-foreground"
+          value={o.email_account_id || ""}
+          disabled={busy || accounts === null}
+          onChange={(e) => {
+            const id = e.target.value;
+            const address = accounts?.find((a) => a.id === id)?.email_address;
+            send("update", { email_account_id: id }, `This file now sends from ${address || "your default account"}`);
+          }}
+        >
+          <option value="">{automaticLabel(accounts)}</option>
+          {(accounts || [])
+            .filter((a) => a.status === "connected" || a.id === o.email_account_id)
+            .map((a) => (
+              <option key={a.id} value={a.id}>
+                {a.email_address}
+                {a.status === "connected" ? "" : " (not connected)"}
+              </option>
+            ))}
+        </select>
+      </label>
+      {o.email_account_issue ? <span className="w-full text-xs text-amber-700 dark:text-amber-300">{o.email_account_issue}</span> : null}
       {o.status === "off" || o.status === "stopped" ? (
         <>
           <Button disabled={busy || !o.waiting_leads} onClick={() => send("start", { auto_send: true }, "Outreach started for this file")}>

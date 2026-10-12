@@ -1,6 +1,6 @@
 "use client";
 
-import { useHealth } from "@/components/app-shell";
+import { InboxHealth } from "@/components/inbox-health";
 import { Badge, Button, Card, Empty, Input, Label } from "@/components/ui";
 import { CheckCircle2, ExternalLink } from "lucide-react";
 import { api } from "@/lib/api";
@@ -10,7 +10,6 @@ import { Suspense, useEffect, useState } from "react";
 import { toast } from "sonner";
 
 function AccountsInner() {
-  const health = useHealth();
   const params = useSearchParams();
   const [accounts, setAccounts] = useState<any[]>([]);
   const [smtp, setSmtp] = useState({
@@ -60,21 +59,16 @@ function AccountsInner() {
     if (params.get("error")) toast.error(params.get("error") || "OAuth error");
   }, []);
 
-  async function connect() {
-    const res = await api<{ authorization_url: string }>("/api/email-accounts/gmail/connect");
-    window.location.href = res.authorization_url;
-  }
-
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-semibold">Email setup</h1>
-          <p className="text-sm text-muted">Connect Gmail or SMTP, test it, then pick that account on a campaign.</p>
+          <p className="text-sm text-muted">
+            Connect as many Gmail accounts as you like. Each has its own daily limit, and you choose which one sends
+            on every campaign, scrape file and audit (&quot;Send from&quot;). The default account is used when you don&apos;t choose.
+          </p>
         </div>
-        <Button disabled={!health?.google_oauth_configured} onClick={() => connect().catch((e) => toast.error(e.message))}>
-          Connect Gmail
-        </Button>
       </div>
       <p className="text-sm">
         Gmail/SMTP Setup Documentation →{" "}
@@ -86,41 +80,26 @@ function AccountsInner() {
           Gmail app password
         </a>
       </p>
-      {!health?.google_oauth_configured ? (
-        <Card className="border-amber-300">
-          Add your Google OAuth Client ID and Client Secret in AI & settings → Gmail first. Then return here to connect Gmail.
-        </Card>
-      ) : (
-        <Card className="text-sm text-muted">
-          If Google shows <span className="font-medium text-foreground">redirect_uri_mismatch</span>, open Settings →
-          Gmail and add those exact Authorized redirect URIs to your OAuth client.
-        </Card>
-      )}
       {smtpConnected.length && !showForm ? (
         <Card className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-start gap-3">
             <CheckCircle2 className="mt-0.5 h-5 w-5 text-emerald-600" />
             <div>
               <div className="flex items-center gap-2">
-                <h2 className="font-medium">SMTP connected</h2>
+                <h2 className="font-medium">
+                  {smtpConnected.length} Gmail / SMTP account{smtpConnected.length === 1 ? "" : "s"} connected
+                </h2>
                 <Badge tone="ok">Connected</Badge>
               </div>
               <p className="text-sm text-muted">{smtpConnected.map((a) => a.email_address).join(", ")}</p>
             </div>
           </div>
-          <div className="flex flex-wrap gap-2">
-            <Button variant="secondary" onClick={() => openForm(smtpConnected[0].email_address)}>
-              Replace password
-            </Button>
-            <Button variant="secondary" onClick={() => openForm()}>
-              Add another account
-            </Button>
-          </div>
+          <Button onClick={() => openForm()}>Add another Gmail</Button>
         </Card>
       ) : (
         <Card className="space-y-3">
           <div className="flex items-center justify-between gap-2">
-            <h2 className="font-medium">Connect SMTP</h2>
+            <h2 className="font-medium">{smtp.email_address && smtpConnected.some((a) => a.email_address === smtp.email_address.trim().toLowerCase()) ? `Replace the password for ${smtp.email_address}` : smtpConnected.length ? "Add another Gmail (SMTP)" : "Connect Gmail (SMTP)"}</h2>
             {smtpConnected.length ? (
               <Button variant="ghost" onClick={() => setFormOpen(false)}>
                 Cancel
@@ -209,19 +188,20 @@ function AccountsInner() {
       )}
       {accounts.some((a) => a.status === "expired" || String(a.last_error || "").toLowerCase().includes("expired")) ? (
         <Card className="border-amber-300">
-          Gmail access expired. Click Connect Gmail again, then Test. Campaigns will not send until this succeeds.
+          A Gmail login stopped working. Click Replace password on it and paste a new App Password, then Test.
+          Nothing sends from it until this succeeds.
         </Card>
       ) : null}
       {accounts.length === 0 ? (
-        <Empty title="No Gmail connected" hint="Click Connect Gmail, then you can send a campaign." />
+        <Empty title="No Gmail connected" hint="Add your Gmail above with an App Password, then you can send." />
       ) : (
         accounts.map((a) => (
-          <Card key={a.id} className="flex flex-wrap items-center justify-between gap-3">
+          <Card key={a.id}>
+          <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
               <div className="font-medium">{a.email_address}</div>
               <div className="text-sm text-muted">
-                {a.provider === "smtp" ? "SMTP" : "Gmail"} · Sent today {a.sent_today}/{a.daily_limit} · remaining {a.remaining_today}
-                {a.is_default ? " · default" : ""}
+                {a.provider === "smtp" ? "SMTP" : "Gmail"} · Sent today {a.sent_today}/{a.limit_today ?? a.daily_limit} · remaining {a.remaining_today}
               </div>
               {a.last_error ? <div className="text-sm text-danger">{a.last_error}</div> : null}
               {a.provider === "smtp" && a.inbox_error ? (
@@ -231,17 +211,17 @@ function AccountsInner() {
               ) : null}
             </div>
             <div className="flex items-center gap-2">
+              {a.is_default ? <Badge tone="ok">Default</Badge> : null}
               <Badge tone={a.status === "connected" ? "ok" : "bad"}>{a.status === "expired" ? "expired — reconnect" : a.status}</Badge>
-              <Button variant="secondary" onClick={() => api(`/api/email-accounts/${a.id}/default`, { method: "POST" }).then(() => { toast.success("Default set"); load(); })}>
-                Default
-              </Button>
-              {a.provider !== "smtp" && a.status === "connected" ? (
-                <Button variant="secondary" onClick={() => api(`/api/email-accounts/${a.id}/refresh`, { method: "POST" }).then(() => toast.success("Refreshed")).catch((e) => toast.error(e.message))}>
-                  Re-auth
+              {a.is_default ? null : (
+                <Button variant="secondary" onClick={() => api(`/api/email-accounts/${a.id}/default`, { method: "POST" }).then(() => { toast.success(`${a.email_address} is now the default`); load(); })}>
+                  Make default
                 </Button>
-              ) : null}
-              {a.status === "expired" || (a.provider !== "smtp" && a.status !== "connected") ? (
-                <Button onClick={() => connect().catch((e) => toast.error(e.message))}>Reconnect Gmail</Button>
+              )}
+              {a.provider === "smtp" ? (
+                <Button variant="secondary" onClick={() => { openForm(a.email_address); window.scrollTo({ top: 0, behavior: "smooth" }); }}>
+                  Replace password
+                </Button>
               ) : null}
               <Button variant="secondary" onClick={() => api(`/api/email-accounts/${a.id}/test`, { method: "POST" }).then(() => { toast.success("Test sent"); load(); }).catch((e) => { toast.error(e.message); load(); })}>
                 Test
@@ -250,6 +230,10 @@ function AccountsInner() {
                 Disconnect
               </Button>
             </div>
+          </div>
+          {a.status === "connected" ? (
+            <InboxHealth account={a} inboxes={smtpConnected.length} onChange={() => load().catch(() => undefined)} />
+          ) : null}
           </Card>
         ))
       )}

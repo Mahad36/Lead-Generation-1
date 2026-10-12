@@ -15,6 +15,7 @@ class QuickAuditRequest(BaseModel):
     country: str = ""
     category: str = ""
     auto_send: bool = False
+    email_account_id: str | None = None  # send from this account (none: the default account)
 
 
 class AuditDraftUpdate(BaseModel):

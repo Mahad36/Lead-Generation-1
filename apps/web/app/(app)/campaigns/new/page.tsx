@@ -1,8 +1,10 @@
 "use client";
 
+import { SendFrom } from "@/components/send-from";
 import { Badge, Button, Card, Input, Label, Textarea } from "@/components/ui";
 import { api } from "@/lib/api";
 import { SAMPLE_LEADS_CSV } from "@/lib/constants";
+import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
@@ -45,6 +47,10 @@ function NewCampaignForm() {
   const [outreachMode, setOutreachMode] = useState<"audit" | "template">("audit");
   // Audit campaigns: send each email as soon as its audit is ready, or keep it for review first.
   const [autoSend, setAutoSend] = useState(true);
+  // Put the signature from Settings under each email of this campaign.
+  const [addSignature, setAddSignature] = useState(true);
+  const [followups, setFollowups] = useState(true);
+  const [signature, setSignature] = useState<string | null>(null);
   const [scheduledAt, setScheduledAt] = useState("");
   const [saving, setSaving] = useState(false);
   const [uploading, setUploading] = useState(false);
@@ -76,12 +82,7 @@ function NewCampaignForm() {
   useEffect(() => {
     api<any[]>("/api/email-accounts").then((rows) => {
       setAccounts(rows);
-      const def =
-        rows.find((a) => a.is_default && a.status === "connected") ||
-        rows.find((a) => a.status === "connected") ||
-        rows.find((a) => a.is_default) ||
-        rows[0];
-      if (def) setAccountId(def.id);
+      // Send from stays on "Automatic" (rotation across connected inboxes) unless you pick one.
     });
     api<any[]>("/api/templates").then((rows) => {
       setTemplates(rows);
@@ -97,14 +98,22 @@ function NewCampaignForm() {
   }, [queryImport, queryScrape, queryManual]);
 
   useEffect(() => {
+    api<{ default_signature?: string }>("/api/settings")
+      .then((s) => setSignature(s.default_signature || ""))
+      .catch(() => setSignature(null));
+  }, []);
+
+  useEffect(() => {
     if (selected) setName((cur) => (cur === "Outreach campaign" || cur.startsWith("Campaign · ") ? `Campaign · ${selected.name}` : cur));
   }, [selected?.id]);
 
   function payload() {
     return {
       name,
-      email_account_id: accountId || accounts[0]?.id || undefined,
+      email_account_id: accountId || undefined, // none: the default account
       outreach_mode: outreachMode,
+      add_signature: addSignature,
+      followups,
       template_id: !audit && copyMode === "template" ? templateId || undefined : undefined,
       lead_ids: [],
       import_batch_id: selected?.kind === "import" ? selected.id : undefined,
@@ -141,11 +150,6 @@ function NewCampaignForm() {
       .catch(() => setPreview(null));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [canSend, selected?.id, selected?.ready_leads, mode]);
-
-  async function connectGmail() {
-    const res = await api<{ authorization_url: string }>("/api/email-accounts/gmail/connect");
-    window.location.href = res.authorization_url;
-  }
 
   async function importCsv(file: File) {
     setUploading(true);
@@ -207,12 +211,12 @@ function NewCampaignForm() {
           <h2 className="font-medium">{accounts.some((a) => a.status === "expired") ? "Reconnect Gmail" : "Connect Gmail first"}</h2>
           <p className="text-sm text-muted">
             {accounts.some((a) => a.status === "expired")
-              ? "The saved Gmail login expired. Reconnect, then you can schedule or send this campaign."
-              : "Campaigns need a connected Gmail or SMTP account."}
+              ? "The saved Gmail login stopped working. Replace its App Password, then you can schedule or send this campaign."
+              : "Campaigns need a connected Gmail (App Password)."}
           </p>
-          <Button onClick={() => connectGmail().catch((e) => toast.error(e.message))}>
-            {accounts.some((a) => a.status === "expired") ? "Reconnect Gmail" : "Connect Gmail"}
-          </Button>
+          <Link href="/email-accounts">
+            <Button>{accounts.some((a) => a.status === "expired") ? "Fix it in Email setup" : "Connect Gmail in Email setup"}</Button>
+          </Link>
         </Card>
       ) : null}
 
@@ -362,19 +366,35 @@ function NewCampaignForm() {
               </p>
             </div>
           ) : null}
+          <div className="mt-3 rounded-xl border border-border p-3">
+            <label className="flex cursor-pointer items-start gap-2 text-sm">
+              <input type="checkbox" className="mt-1" checked={addSignature} onChange={(e) => setAddSignature(e.target.checked)} />
+              <span>
+                <span className="font-medium">Add my signature</span>
+                <span className="block text-xs text-muted">
+                  {signature === null
+                    ? "Adds the signature from AI & settings under each email."
+                    : signature.trim()
+                      ? `Adds your signature under each email, replacing a closing name/company line: ${signature.trim().split("\n").filter(Boolean).join(" · ")}`
+                      : "You haven't set a signature yet. Add one in AI & settings → Email signature."}
+                </span>
+              </span>
+            </label>
+            <label className="mt-3 flex cursor-pointer items-start gap-2 text-sm">
+              <input type="checkbox" className="mt-1" checked={followups} onChange={(e) => setFollowups(e.target.checked)} />
+              <span>
+                <span className="font-medium">Send follow-ups</span>
+                <span className="block text-xs text-muted">
+                  If a lead doesn&apos;t reply, short follow-ups go out in the same thread (timing in AI &amp; settings →
+                  Sending). They stop as soon as the lead replies.
+                </span>
+              </span>
+            </label>
+          </div>
         </div>
         {accounts.length ? (
           <div className="grid gap-3 sm:grid-cols-2">
-            <div>
-              <Label>Send from</Label>
-              <select className="w-full rounded-md border border-border bg-card px-3 py-2 text-sm" value={accountId} onChange={(e) => setAccountId(e.target.value)}>
-                {accounts.map((a) => (
-                  <option key={a.id} value={a.id}>
-                    {a.email_address}
-                  </option>
-                ))}
-              </select>
-            </div>
+            <SendFrom value={accountId} onChange={setAccountId} />
             {audit ? null : (
               <div>
                 <Label>Email</Label>

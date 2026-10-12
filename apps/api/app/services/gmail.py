@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session
 
 from app.logging_config import get_logger
 from app.models import EmailAccount, EmailMessage
-from app.utils.dates import local_day_start
+from app.utils.dates import local_day_start, local_today
 from app.services.integrations import GoogleOAuthConfig, resolve_google_oauth
 from app.utils.crypto import decrypt_text, encrypt_text
 
@@ -167,7 +167,9 @@ def store_account(db: Session, user_id: str, token_payload: dict) -> EmailAccoun
         .filter(EmailAccount.user_id == user_id, EmailAccount.email_address == email)
         .first()
     )
-    account = existing or EmailAccount(user_id=user_id, email_address=email, provider="gmail")
+    account = existing or EmailAccount(
+        user_id=user_id, email_address=email, provider="gmail", ramp_started_on=local_today()
+    )
     if existing and existing.encrypted_credentials:
         try:
             previous = json.loads(decrypt_text(existing.encrypted_credentials))
@@ -337,7 +339,8 @@ def store_smtp_account(
         .first()
     )
     if not account:
-        account = EmailAccount(user_id=user_id, email_address=address)
+        # A new inbox ramps up: a few emails on day one, more each day (services/deliverability.py)
+        account = EmailAccount(user_id=user_id, email_address=address, ramp_started_on=local_today())
     account.provider = "smtp"
     account.display_name = display_name or email_address
     account.status = "connected"
@@ -440,7 +443,11 @@ def sent_today_count(db: Session, account: EmailAccount) -> int:
 
 
 def daily_limit_reached(db: Session, account: EmailAccount) -> bool:
-    return bool(account.daily_limit) and sent_today_count(db, account) >= account.daily_limit
+    """Today's limit reached (lower while a new inbox ramps up)."""
+    from app.services.deliverability import effective_daily_limit
+
+    limit = effective_daily_limit(account)
+    return bool(limit) and sent_today_count(db, account) >= limit
 
 
 def send_gmail_message(

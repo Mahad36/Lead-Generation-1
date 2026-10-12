@@ -27,7 +27,7 @@ export type ThreadSummary = {
 type Message = Tracking & {
   id: string;
   direction: "in" | "out";
-  source: "outreach" | "inbox" | "auto" | "app" | "gmail";
+  source: "outreach" | "inbox" | "app" | "gmail" | "followup";
   from_email: string;
   to_email: string;
   subject: string;
@@ -44,8 +44,8 @@ type Thread = Omit<ThreadSummary, "last_at" | "last_direction" | "last_snippet" 
 const SOURCE_LABEL: Record<Message["source"], string> = {
   outreach: "Your outreach email",
   inbox: "Their reply",
-  auto: "Automatic reply (not from a person)",
   app: "You replied from the app",
+  followup: "Automatic follow-up",
   gmail: "You replied from Gmail",
 };
 
@@ -199,6 +199,77 @@ export function LeadConversations({ leadId }: { leadId: string }) {
           <ConversationView rootId={t.root_id} />
         </div>
       ))}
+    </div>
+  );
+}
+
+type FollowupStatus = {
+  root_id: string;
+  subject: string;
+  sent_at: string;
+  enabled: boolean;
+  sent: number;
+  total: number;
+  done: boolean;
+  next_at: string | null;
+};
+
+/** Follow-ups after the emails sent to this lead: how many went out, when the next one is due, and a stop button. */
+export function LeadFollowups({ leadId }: { leadId: string }) {
+  const [rows, setRows] = useState<FollowupStatus[]>([]);
+  const [busy, setBusy] = useState(false);
+
+  const load = useCallback(
+    () =>
+      api<FollowupStatus[]>(`/api/conversations/followups?lead_id=${leadId}`)
+        .then(setRows)
+        .catch(() => setRows([])),
+    [leadId]
+  );
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  const tracked = rows.filter((r) => r.enabled);
+  if (!tracked.length) return null;
+  const pending = tracked.some((r) => !r.done);
+
+  async function stop() {
+    setBusy(true);
+    try {
+      await api(`/api/conversations/followups/stop?lead_id=${leadId}`, { method: "POST" });
+      toast.success("No more follow-ups to this lead");
+      await load();
+    } catch (e) {
+      toast.error((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border bg-card px-4 py-3 text-sm">
+      <div className="space-y-1">
+        <div className="font-medium">Follow-ups</div>
+        {tracked.map((r) => (
+          <div key={r.root_id} className="text-xs text-muted">
+            &quot;{r.subject}&quot;: {r.sent} of {r.total} sent
+            {r.done
+              ? r.sent >= r.total
+                ? " · all sent"
+                : " · stopped"
+              : r.next_at
+                ? ` · next ${formatDate(r.next_at)} (sending hours and the daily limit apply)`
+                : ""}
+          </div>
+        ))}
+      </div>
+      {pending ? (
+        <Button variant="secondary" disabled={busy} onClick={stop}>
+          Stop follow-ups
+        </Button>
+      ) : null}
     </div>
   );
 }

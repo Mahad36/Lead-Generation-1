@@ -2,6 +2,7 @@
 
 import { FileOutreachControls, OutreachModePicker, type FileOutreach, type OutreachMode } from "@/components/file-outreach";
 import { LocationPicker, searchArea, type Location } from "@/components/location-picker";
+import { SendFrom } from "@/components/send-from";
 import { OutreachTable, type OutreachLead } from "@/components/outreach";
 import { Badge, Button, Card, Input, Label } from "@/components/ui";
 import { api } from "@/lib/api";
@@ -57,6 +58,8 @@ export default function ScrapingPage() {
   const [dailyLimit, setDailyLimit] = useState(50);
   const [outreachMode, setOutreachMode] = useState<OutreachMode>("auto");
   const [outreachLimit, setOutreachLimit] = useState(10);
+  const [outreachAccount, setOutreachAccount] = useState(""); // "" = automatic (rotation)
+  const [followups, setFollowups] = useState(true);
   const [source, setSource] = useState<{ provider: string; apifyReady: boolean } | null>(null);
 
   async function loadLeads(jobId: string) {
@@ -134,6 +137,8 @@ export default function ScrapingPage() {
         // This file's own automatic outreach (audit -> PDF -> personalised email), independent of other files.
         outreach_mode: outreachMode,
         outreach_daily_limit: outreachLimit,
+        outreach_email_account_id: outreachAccount || undefined,
+        followups,
       }),
     });
     const started = await api<Job>(`/api/scraping/jobs/${created.id}/start`, { method: "POST" });
@@ -248,6 +253,20 @@ export default function ScrapingPage() {
           </p>
         ) : null}
         <OutreachModePicker mode={outreachMode} limit={outreachLimit} onMode={setOutreachMode} onLimit={setOutreachLimit} />
+        {outreachMode !== "off" ? (
+          <div className="space-y-2">
+            <SendFrom className="max-w-md" value={outreachAccount} onChange={setOutreachAccount} />
+            <label className="flex items-start gap-2 text-sm">
+              <input type="checkbox" className="mt-1" checked={followups} onChange={(e) => setFollowups(e.target.checked)} />
+              <span>
+                Send follow-ups
+                <span className="block text-xs text-muted">
+                  Short follow-ups in the same thread if a lead doesn&apos;t reply (timing in AI &amp; settings → Sending).
+                </span>
+              </span>
+            </label>
+          </div>
+        ) : null}
         <div className="flex flex-wrap gap-2">
           <Button onClick={() => start().catch((e) => toast.error(e.message))}>Start scraping</Button>
           <Button variant="secondary" disabled={!job} onClick={() => action("pause")}>Pause</Button>

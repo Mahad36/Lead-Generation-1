@@ -1,5 +1,6 @@
 "use client";
 
+import { SendFrom } from "@/components/send-from";
 import { TrackingBadges, type Tracking } from "@/components/tracking-badges";
 import { Badge, Button, Card, Input, Label, Textarea } from "@/components/ui";
 import { api } from "@/lib/api";
@@ -19,6 +20,7 @@ export type Audit = Tracking & {
   error_message: string;
   website_url: string;
   recipient_email: string;
+  email_account_id: string | null;
   auto_send: boolean;
   overall_score: number | null;
   headline: string;
@@ -147,6 +149,7 @@ export function AuditPanel({
   const [loaded, setLoaded] = useState(false);
   const [recipient, setRecipient] = useState(defaultEmail || "");
   const [autoSend, setAutoSend] = useState(false);
+  const [fromAccount, setFromAccount] = useState(""); // "" = default account
   const [subject, setSubject] = useState("");
   const [body, setBody] = useState("");
   const [preview, setPreview] = useState(true);
@@ -166,6 +169,7 @@ export function AuditPanel({
     setSubject(data.email_subject || "");
     setBody(data.email_html || "");
     if (data.recipient_email) setRecipient(data.recipient_email);
+    setFromAccount(data.email_account_id || "");
   }, []);
 
   const loadAudit = useCallback(
@@ -205,7 +209,7 @@ export function AuditPanel({
     try {
       const data = await api<Audit>(`/api/leads/${leadId}/audits`, {
         method: "POST",
-        body: JSON.stringify({ recipient_email: recipient || null, auto_send: autoSend }),
+        body: JSON.stringify({ recipient_email: recipient || null, auto_send: autoSend, email_account_id: fromAccount || null }),
       });
       draftKey.current = "";
       applyAudit(data);
@@ -278,7 +282,12 @@ export function AuditPanel({
     try {
       const data = await api<Audit>(`/api/audits/${audit.id}/send`, {
         method: "POST",
-        body: JSON.stringify({ recipient_email: recipient, email_subject: subject, email_html: body }),
+        body: JSON.stringify({
+          recipient_email: recipient,
+          email_subject: subject,
+          email_html: body,
+          email_account_id: fromAccount, // "" = the default account
+        }),
         signal: AbortSignal.timeout(120_000),
       });
       applyAudit(data);
@@ -319,6 +328,7 @@ export function AuditPanel({
               <input type="checkbox" checked={autoSend} onChange={(e) => setAutoSend(e.target.checked)} />
               Send automatically when ready (skip review)
             </label>
+            <SendFrom className="mt-3" value={fromAccount} onChange={setFromAccount} hint={false} />
           </div>
           <Button onClick={run} disabled={busy === "run" || !loaded}>
             {busy === "run" ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileText className="h-4 w-4" />}
@@ -455,6 +465,7 @@ export function AuditPanel({
                     Attachment: {audit.pdf_filename} ({Math.round(audit.pdf_size / 1024)} KB). An unsubscribe link is added automatically.
                   </p>
                 </div>
+                <SendFrom className="max-w-md" value={fromAccount} onChange={setFromAccount} hint={false} />
                 <div className="flex flex-wrap gap-2">
                   <Button variant="secondary" onClick={saveDraft} disabled={!!busy}>
                     Save draft

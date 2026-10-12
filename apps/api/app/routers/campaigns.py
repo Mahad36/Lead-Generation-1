@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, Request
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -55,6 +56,22 @@ def create_campaign(
 @router.get("/{campaign_id}", response_model=CampaignOut)
 def get_campaign(campaign_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     campaign = campaign_service.get_campaign(db, user.id, campaign_id)
+    return campaign_service.serialize_campaign(db, campaign)
+
+
+class CampaignAccountIn(BaseModel):
+    email_account_id: str | None = None  # "" / None: the default account
+
+
+@router.post("/{campaign_id}/email-account", response_model=CampaignOut)
+def change_email_account(
+    campaign_id: str,
+    payload: CampaignAccountIn,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Send the rest of this campaign from another of your email accounts."""
+    campaign = campaign_service.set_campaign_email_account(db, user.id, campaign_id, payload.email_account_id)
     return campaign_service.serialize_campaign(db, campaign)
 
 

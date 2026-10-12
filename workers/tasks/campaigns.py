@@ -129,6 +129,13 @@ def process_campaign_queue(campaign_id: str) -> dict:
             if delay is not None:
                 _continue_queue(campaign_id, delay)
             return {"status": result}
+        from app.services.deliverability import seconds_until_window
+
+        wait = seconds_until_window(db, campaign.user_id)
+        if wait:
+            # Outside your sending hours: carry on when they start
+            _continue_queue(campaign_id, wait + 5)
+            return {"status": "waiting_for_sending_hours"}
         claimed = claim_next_campaign_lead(db, campaign_id, worker_id)
         if not claimed:
             pending_gen = (

@@ -32,6 +32,10 @@ class ScrapingJob(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     outreach_status: Mapped[str] = mapped_column(String(16), default="off", index=True, nullable=False)
     outreach_auto_send: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     outreach_daily_limit: Mapped[int] = mapped_column(Integer, default=10, nullable=False)
+    # The email account this file's outreach sends from (none: your default account)
+    outreach_email_account_id: Mapped[str | None] = mapped_column(
+        UUID(as_uuid=False), ForeignKey("email_accounts.id", ondelete="SET NULL"), nullable=True
+    )
 
     searches: Mapped[list["ScrapingSearch"]] = relationship(
         back_populates="job", cascade="all, delete-orphan", order_by="ScrapingSearch.sort_order"

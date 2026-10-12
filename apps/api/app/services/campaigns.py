@@ -21,10 +21,12 @@ from app.models import (
 from app.schemas.campaigns import CampaignCreate
 from app.services.ai import AINotConfiguredError, generate_personalized_email
 from app.services.audit import write_audit
+from app.services.deliverability import address_problem, pick_sending_account
 from app.services.gmail import GmailSendError, daily_limit_reached, send_gmail_message
 from app.services.limits import LimitValidationError, validate_send_limits
 from app.services.suppression import is_suppressed
-from app.services.templates import build_template_context
+from app.services.templates import build_template_context, text_context
+from app.utils.signature import insert_signature
 from app.utils.templates import render_template
 
 logger = get_logger("campaigns")
@@ -267,7 +269,15 @@ def create_campaign(db: Session, user_id: str, data: CampaignCreate, meta: dict)
         raise HTTPException(status_code=400, detail="No leads with an email address to campaign")
     for lead in leads:
         db.add(CampaignLead(campaign_id=campaign.id, lead_id=lead.id, status="pending"))
-    extra = {**(campaign.extra or {}), **_campaign_file_extra(db, user_id, data), "outreach_mode": data.outreach_mode}
+    extra = {
+        **(campaign.extra or {}),
+        **_campaign_file_extra(db, user_id, data),
+        "outreach_mode": data.outreach_mode,
+        "add_signature": data.add_signature,
+        "followups": data.followups,
+        # No inbox chosen: each email goes from the connected inbox with the most room today
+        "rotate": not data.email_account_id,
+    }
     if data.scheduled_at:
         extra["scheduled_at"] = data.scheduled_at.isoformat()
         campaign.start_date = data.scheduled_at.date()
@@ -411,6 +421,8 @@ def serialize_campaign(db: Session, campaign: Campaign) -> dict:
         "scheduled_at": (campaign.extra or {}).get("scheduled_at", "") or "",
         "outreach_mode": "audit" if is_audit_campaign(campaign) else "template",
         "auditing_count": counts.get("auditing", 0),
+        "rotate": campaign_rotates(campaign),
+        "followups": campaign_followups(campaign),
     }
 
 
@@ -494,6 +506,9 @@ def generate_for_campaign_lead(db: Session, campaign_lead_id: str) -> CampaignLe
     cl.status = "generating"
     db.commit()
     context = build_template_context(db, campaign.user_id, lead)
+    add_signature = (campaign.extra or {}).get("add_signature", True) is not False
+    if not add_signature:
+        context["signature"] = ""  # "Add my signature" is off for this campaign: {{signature}} stays empty too
     settings = _settings_or_defaults(db, campaign.user_id)
     analysis = {}
     if lead.website and lead.website.analysis:
@@ -539,7 +554,15 @@ def generate_for_campaign_lead(db: Session, campaign_lead_id: str) -> CampaignLe
         cl.html_body = render_template(template.html_body, context)
         cl.personalized_message = ""
     cl.subject = render_template(template.subject, context)
-    cl.text_body = render_template(template.text_body or "", context) or ""
+    text_ctx = text_context(context, db, campaign.user_id) if add_signature else context
+    cl.text_body = render_template(template.text_body or "", text_ctx) or ""
+    if add_signature and context.get("signature") and "{{signature}}" not in (template.html_body or ""):
+        # The template doesn't place it: add the signature under the email.
+        cl.html_body = insert_signature(
+            cl.html_body, context["signature"], context.get("sender_name", ""), context.get("sender_company", "")
+        )
+        if cl.text_body.strip() and "{{signature}}" not in (template.text_body or ""):
+            cl.text_body = f"{cl.text_body.rstrip()}\n\n{text_ctx['signature']}"
     cl.status = "ready" if campaign.require_approval else "approved"
     if not campaign.require_approval:
         cl.approved = True
@@ -591,6 +614,8 @@ def start_campaign(db: Session, user_id: str, campaign_id: str, meta: dict) -> C
     if campaign.status in {"completed", "stopped"}:
         raise HTTPException(status_code=400, detail="Campaign cannot be started again")
     account = db.get(EmailAccount, campaign.email_account_id) if campaign.email_account_id else None
+    if campaign_rotates(campaign):
+        account = pick_sending_account(db, user_id) or account
     if not account or account.status != "connected":
         raise HTTPException(status_code=400, detail="Reconnect Gmail or SMTP before starting this campaign")
     campaign.status = "running"
@@ -639,6 +664,8 @@ def send_claimed_lead(db: Session, campaign_lead: CampaignLead) -> str:
     campaign = db.get(Campaign, campaign_lead.campaign_id)
     lead = db.get(Lead, campaign_lead.lead_id)
     account = db.get(EmailAccount, campaign.email_account_id) if campaign else None
+    if campaign and campaign_rotates(campaign):
+        account = pick_sending_account(db, campaign.user_id) or account
     if not campaign or not lead or not account:
         campaign_lead.status = "failed"
         campaign_lead.error_message = "Missing campaign, lead, or email account"
@@ -700,6 +727,23 @@ def send_claimed_lead(db: Session, campaign_lead: CampaignLead) -> str:
         campaign_lead.locked_at = None
         db.commit()
         return "failed"
+    if account.paused_reason:
+        # Too many bounces: wait until the inbox is resumed in Email setup (or another inbox is chosen)
+        campaign.status = "paused"
+        campaign.paused_reason = "inbox_paused_bounces"
+        campaign_lead.status = "queued"
+        campaign_lead.locked_at = None
+        campaign_lead.locked_by = ""
+        db.commit()
+        return "inbox_paused"
+    problem = address_problem(db, campaign.user_id, lead.primary_email)
+    if problem:
+        campaign_lead.status = "skipped"
+        campaign_lead.skip_reason = "email_domain_rejects_mail"
+        campaign_lead.error_message = problem
+        campaign_lead.locked_at = None
+        db.commit()
+        return "skipped"
     if daily_limit_reached(db, account):
         # The account's own daily limit covers every email it sends (audits, other campaigns), not just this one.
         campaign.status = "paused"
@@ -746,6 +790,7 @@ def send_claimed_lead(db: Session, campaign_lead: CampaignLead) -> str:
         text_body=text_body,
         status="sending",
         rfc_message_id=rfc_message_id,
+        followups_enabled=bool(not settings or settings.followups_enabled) and campaign_followups(campaign),
     )
     db.add(message)
     db.commit()
@@ -855,14 +900,14 @@ def lead_has_audit_outreach(db: Session, lead_id: str) -> bool:
 def _mirror_audit(cl: CampaignLead, audit) -> None:
     from app.services.website_audit import ACTIVE_STATUSES
 
-    from app.services.website_audit import WAITING_FOR_LIMIT
+    from app.services.website_audit import WAITING_STEPS
 
     if audit.sent_at and audit.status in {"sent", "ready"}:
         cl.status, cl.sent_at, cl.error_message = "sent", audit.sent_at, ""
     elif audit.status in ACTIVE_STATUSES:
         cl.status = "auditing"
-    elif audit.status == "ready" and audit.step == WAITING_FOR_LIMIT:
-        cl.status, cl.error_message = "auditing", "Waiting for the daily send limit"
+    elif audit.status == "ready" and audit.step in WAITING_STEPS:
+        cl.status, cl.error_message = "auditing", audit.step
     elif audit.status == "ready" and audit.step == CAMPAIGN_PAUSED_STEP:
         cl.status, cl.error_message = "auditing", "Paused: the email is sent when the campaign resumes"
     elif audit.status == "ready":
@@ -970,6 +1015,8 @@ def advance_audit_campaign(db: Session, campaign: Campaign) -> tuple[str, int | 
         reason = "suppressed"
     elif campaign.skip_previously_contacted and lead.last_contacted_at:
         reason = "previously_contacted"
+    elif address_problem(db, campaign.user_id, lead.primary_email):
+        reason = "email_domain_rejects_mail"
     if reason:
         claimed.status = "unsubscribed" if reason == "suppressed" else "skipped"
         claimed.skip_reason, claimed.locked_at, claimed.locked_by = reason, None, ""
@@ -993,7 +1040,7 @@ def advance_audit_campaign(db: Session, campaign: Campaign) -> tuple[str, int | 
             campaign.user_id,
             lead.id,
             auto_send=not campaign.require_approval,
-            email_account_id=campaign.email_account_id,
+            email_account_id=None if campaign_rotates(campaign) else campaign.email_account_id,
             trigger="campaign",
         )
     except HTTPException as exc:
@@ -1020,6 +1067,39 @@ def advance_audit_campaign(db: Session, campaign: Campaign) -> tuple[str, int | 
 
 CAMPAIGN_PAUSED_STEP = "Waiting: the campaign is paused (sends when it resumes)"
 CAMPAIGN_STOPPED_STEP = "Ready: the campaign was stopped, so this email was not sent"
+
+
+def campaign_for_audit(db: Session, audit) -> Campaign | None:
+    """The audit campaign this audit was started by (None for scrape-file and manual audits)."""
+    if audit.trigger != "campaign":
+        return None
+    return (
+        db.query(Campaign)
+        .join(CampaignLead, CampaignLead.campaign_id == Campaign.id)
+        .filter(
+            Campaign.user_id == audit.user_id,
+            CampaignLead.lead_id == audit.lead_id,
+            Campaign.extra.contains({"outreach_mode": "audit"}),
+        )
+        .order_by(CampaignLead.updated_at.desc())
+        .first()
+    )
+
+
+def campaign_adds_signature(db: Session, audit) -> bool:
+    """False when the audit belongs to a campaign started with "Add my signature" switched off."""
+    campaign = campaign_for_audit(db, audit)
+    return not campaign or (campaign.extra or {}).get("add_signature", True) is not False
+
+
+def campaign_rotates(campaign: Campaign) -> bool:
+    """No inbox chosen: emails rotate across every connected inbox."""
+    return bool((campaign.extra or {}).get("rotate"))
+
+
+def campaign_followups(campaign: Campaign | None) -> bool:
+    """The campaign's "Send follow-ups" switch (on unless switched off)."""
+    return not campaign or (campaign.extra or {}).get("followups", True) is not False
 
 
 def campaign_hold(db: Session, audit) -> str:
@@ -1123,9 +1203,37 @@ def release_paused_sends(db: Session, campaign: Campaign) -> int:
             db.rollback()
             if exc.status_code == 429:
                 audit = db.get(WebsiteAudit, audit.id)
-                audit.step = WAITING_FOR_LIMIT  # the poller sends it when the daily limit allows
+                from app.services.deliverability import waiting_step
+
+                audit.step = waiting_step(exc, WAITING_FOR_LIMIT)  # the poller sends it when allowed
                 db.commit()
                 break
         except AuditSendError:
             pass  # recorded on the audit (send_failed)
     return sent
+
+
+def set_campaign_email_account(db: Session, user_id: str, campaign_id: str, account_id: str | None) -> Campaign:
+    """Send the rest of this campaign from another account ("" / None: the default account).
+
+    Emails already sent stay as they are; audits still being prepared or waiting to send switch to the new account.
+    """
+    from app.models import WebsiteAudit
+
+    campaign = get_campaign(db, user_id, campaign_id)
+    account = resolve_email_account(db, user_id, account_id or None)
+    campaign.email_account_id = account.id
+    campaign.extra = {**(campaign.extra or {}), "rotate": not account_id}
+    lead_ids = [row[0] for row in db.query(CampaignLead.lead_id).filter(CampaignLead.campaign_id == campaign.id)]
+    if lead_ids and is_audit_campaign(campaign):
+        for audit in db.query(WebsiteAudit).filter(
+            WebsiteAudit.user_id == user_id,
+            WebsiteAudit.trigger == "campaign",
+            WebsiteAudit.lead_id.in_(lead_ids),
+            WebsiteAudit.sent_at.is_(None),
+        ):
+            audit.email_account_id = None if not account_id else account.id  # None: rotation picks at send time
+    db.commit()
+    db.refresh(campaign)
+    logger.info("campaign_account_changed", campaign_id=campaign.id, account_id=account.id)
+    return campaign

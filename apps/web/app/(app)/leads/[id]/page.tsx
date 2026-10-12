@@ -1,7 +1,7 @@
 "use client";
 
 import { AuditPanel } from "@/components/audit-panel";
-import { LeadConversations } from "@/components/conversation";
+import { LeadConversations, LeadFollowups } from "@/components/conversation";
 import { OutreachStepper } from "@/components/outreach";
 import { Badge, Button, Card, Input } from "@/components/ui";
 import { api } from "@/lib/api";
@@ -87,6 +87,7 @@ export default function LeadDetailPage() {
           </Button>
         </div>
       </div>
+      <LeadFollowups leadId={id} />
       <LeadConversations leadId={id} />
       {lead.outreach ? (
         <Card className="space-y-2">

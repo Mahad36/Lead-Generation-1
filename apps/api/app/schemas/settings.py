@@ -1,6 +1,8 @@
 from typing import Literal
 
-from pydantic import BaseModel, Field
+import re
+
+from pydantic import BaseModel, Field, field_validator
 
 
 class UserServiceIn(BaseModel):
@@ -53,6 +55,16 @@ class SettingsOut(BaseModel):
     skip_previously_contacted: bool
     require_verified_emails: bool
     respect_suppression_list: bool
+    # Deliverability (on by default)
+    followups_enabled: bool = True
+    followup_days: str = "3,5"
+    send_window_enabled: bool = True
+    send_window_start: int = 8
+    send_window_end: int = 19
+    send_weekdays_only: bool = True
+    day_start_hour: int = 0
+    check_email_domains: bool = True
+    warmup_enabled: bool = True
     google_oauth_configured: bool
     google_client_id: str = ""
     google_client_secret_set: bool = False
@@ -98,5 +110,26 @@ class SettingsUpdate(BaseModel):
     require_approval_before_sending: bool | None = None
     skip_previously_contacted: bool | None = None
     require_verified_emails: bool | None = None
+    followups_enabled: bool | None = None
+    followup_days: str | None = Field(default=None, max_length=64)
+    send_window_enabled: bool | None = None
+    send_window_start: int | None = Field(default=None, ge=0, le=23)
+    send_window_end: int | None = Field(default=None, ge=1, le=24)
+    send_weekdays_only: bool | None = None
+    day_start_hour: int | None = Field(default=None, ge=0, le=23)
+    check_email_domains: bool | None = None
+    warmup_enabled: bool | None = None
+
+    @field_validator("followup_days")
+    @classmethod
+    def clean_followup_days(cls, value: str | None) -> str | None:
+        """"3, 5" -> "3,5": 1 to 5 follow-ups, each 1-60 days after the previous email."""
+        if value is None:
+            return None
+        days = [int(p) for p in re.split(r"[,\s;]+", value) if p.strip().isdigit()]
+        days = [min(max(d, 1), 60) for d in days if d > 0][:5]
+        if not days:
+            raise ValueError("Enter the days between emails, e.g. 3,5 (or switch follow-ups off)")
+        return ",".join(str(d) for d in days)
     respect_suppression_list: bool | None = None
     services: list[UserServiceIn] | None = None

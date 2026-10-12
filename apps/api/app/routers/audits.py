@@ -26,6 +26,7 @@ def quick_audit(
         lead.id,
         recipient_email=payload.email,
         auto_send=payload.auto_send,
+        email_account_id=payload.email_account_id or None,
         website_url=payload.website_url,
         meta=meta,
     )
@@ -115,7 +116,9 @@ def send_audit(
     db: Session = Depends(get_db),
 ):
     try:
-        audit = audit_service.send_audit(db, user.id, audit_id, **payload.model_dump(), meta=get_client_meta(request))
+        audit = audit_service.send_audit(
+            db, user.id, audit_id, **payload.model_dump(), meta=get_client_meta(request), manual=True
+        )  # you pressed Send: no sending-hours wait
     except audit_service.AuditSendError as exc:
         raise HTTPException(status_code=502, detail=f"Email was not sent: {exc}") from exc
     return audit_service.serialize_audit(audit)

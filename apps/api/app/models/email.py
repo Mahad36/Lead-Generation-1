@@ -1,6 +1,6 @@
-from datetime import datetime
+from datetime import date, datetime
 
-from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import BigInteger, Boolean, Date, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -39,6 +39,14 @@ class EmailAccount(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     sent_folder: Mapped[str] = mapped_column(String(255), default="", nullable=False)
     sent_uidvalidity: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     sent_last_uid: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # Ramp-up: a new inbox starts low and rises each day to daily_limit (None: already warmed up)
+    ramp_started_on: Mapped[date | None] = mapped_column(Date, nullable=True)
+    # Paused automatically (too many bounces) until you resume it in Email setup
+    paused_reason: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    paused_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    warmup_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    # Last spam-placement test and domain (SPF / DKIM / DMARC) check
+    health: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
 
     user = relationship("User")
 
@@ -94,6 +102,14 @@ class EmailMessage(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     click_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     clicked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_clicked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Follow-ups: their own rows (tracking, daily limit) pointing at the first email of the thread
+    followup_of_id: Mapped[str | None] = mapped_column(
+        UUID(as_uuid=False), ForeignKey("email_messages.id", ondelete="CASCADE"), index=True, nullable=True
+    )
+    followup_step: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    # First emails: follow-ups go out after it (decided when it was sent); done = finished or stopped
+    followups_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    followups_done_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     events: Mapped[list["EmailEvent"]] = relationship(
         back_populates="message", cascade="all, delete-orphan"
@@ -124,7 +140,7 @@ class ConversationMessage(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         UUID(as_uuid=False), ForeignKey("email_messages.id", ondelete="SET NULL"), nullable=True
     )
     direction: Mapped[str] = mapped_column(String(8), nullable=False)  # "in" (their reply) | "out" (your answer)
-    source: Mapped[str] = mapped_column(String(16), nullable=False)  # "inbox" | "auto" (automatic reply) | "app" | "gmail"
+    source: Mapped[str] = mapped_column(String(16), nullable=False)  # "inbox" | "app" | "gmail" | "followup"
     from_email: Mapped[str] = mapped_column(String(320), default="", nullable=False)
     to_email: Mapped[str] = mapped_column(String(320), default="", nullable=False)
     subject: Mapped[str] = mapped_column(String(500), default="", nullable=False)
@@ -180,3 +196,26 @@ class PasswordResetToken(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     token_hash: Mapped[str] = mapped_column(String(128), unique=True, nullable=False)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     used: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
+
+class WarmupMessage(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """A warm-up email between two of your own inboxes (kept apart from outreach numbers and limits)."""
+
+    __tablename__ = "warmup_messages"
+
+    user_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False), ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    from_account_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False), ForeignKey("email_accounts.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    to_account_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False), ForeignKey("email_accounts.id", ondelete="CASCADE"), nullable=False
+    )
+    rfc_message_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    in_reply_to: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    subject: Mapped[str] = mapped_column(String(500), default="", nullable=False)
+    sent_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True, nullable=False)
+    landed: Mapped[str] = mapped_column(String(16), default="", nullable=False)  # inbox | spam | promotions | missing
+    handled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    replied: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)

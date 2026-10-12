@@ -25,6 +25,44 @@ def list_conversations(
     return service.list_threads(db, user.id, unread_only=unread, lead_id=lead_id)
 
 
+@router.get("/leads")
+def replied_leads(
+    q: str | None = None,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Every lead who replied to your emails, latest reply first."""
+    return service.replied_leads(db, user.id, q)
+
+
+@router.get("/followups")
+def lead_followups(lead_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Follow-up status of each first email sent to this lead (sent so far, next one due, or stopped)."""
+    from app.models import EmailMessage
+    from app.services.followups import followup_summary
+
+    roots = (
+        db.query(EmailMessage)
+        .filter(
+            EmailMessage.user_id == user.id,
+            EmailMessage.lead_id == lead_id,
+            EmailMessage.followup_of_id.is_(None),
+            EmailMessage.status == "sent",
+            EmailMessage.is_test.is_(False),
+        )
+        .order_by(EmailMessage.sent_at.desc())
+        .all()
+    )
+    return [{"root_id": r.id, "subject": r.subject, "sent_at": r.sent_at, **followup_summary(db, r)} for r in roots]
+
+
+@router.post("/followups/stop")
+def stop_lead_followups(lead_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    from app.services.followups import stop_followups
+
+    return {"stopped": stop_followups(db, user.id, lead_id)}
+
+
 @router.get("/unread-count")
 def unread_count(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     return {"unread": service.unread_count(db, user.id)}

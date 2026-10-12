@@ -1,6 +1,7 @@
 "use client";
 
 import { useHealth } from "@/components/app-shell";
+import { useEmailAccounts } from "@/components/send-from";
 import { Button, Card } from "@/components/ui";
 import { api } from "@/lib/api";
 import Link from "next/link";
@@ -31,6 +32,7 @@ export default function DashboardPage() {
   const [data, setData] = useState<Dash | null>(null);
   const [error, setError] = useState("");
   const health = useHealth();
+  const accounts = useEmailAccounts();
 
   useEffect(() => {
     api<Dash>("/api/dashboard")
@@ -90,9 +92,13 @@ export default function DashboardPage() {
           </div>
         </div>
       </Card>
-      {!health?.google_oauth_configured ? (
+      {accounts && !accounts.some((a) => a.status === "connected") ? (
         <Card className="border-amber-300 bg-amber-50 text-amber-900 dark:bg-amber-950/40 dark:text-amber-100">
-          Add your Google OAuth Client ID and Secret in Settings, then connect Gmail.
+          No email account connected yet.{" "}
+          <Link href="/email-accounts" className="underline">
+            Connect a Gmail in Email setup
+          </Link>{" "}
+          (with an App Password) to start sending.
         </Card>
       ) : null}
       {!health?.ai_configured ? (

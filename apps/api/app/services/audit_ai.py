@@ -178,7 +178,9 @@ Rules:
   business like theirs, e.g. "We recently built https://example.com for another skincare brand." Write the URL out
   in full as the visible link text: <a href="URL">URL</a>. Describe it plainly (same industry / similar products);
   never claim results or numbers for it.
-- End with a simple yes/no question about the offer (e.g. "Want me to put it together?"), then sign off with the
+- End with a simple yes/no question about the offer (e.g. "Want me to put it together?"), then sign off. When
+  sender.signature_added is true, the sign-off is only a short closing such as "Best," with nothing after it (the
+  sender's signature with name and company is added underneath automatically); otherwise sign off with the
   sender's name and company.
 - No invented facts, no flattery, no fake urgency, no claims about results or rankings.
 - 90-160 words. body_html: simple <p> paragraphs only (no <html>, <head>, styles or images; the reference site is

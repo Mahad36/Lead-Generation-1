@@ -41,6 +41,8 @@ def create_job(db: Session, user_id: str, data: ScrapingJobCreate) -> ScrapingJo
     name = data.name
     if not name or name in {"Scraping job", "Maps scrape"}:
         name = " + ".join(f"{item.city} {item.category}".strip() for item in data.searches)[:255] or "Maps scrape"
+    from app.services.auto_audits import own_email_account_id
+
     job = ScrapingJob(
         user_id=user_id,
         name=name,
@@ -50,10 +52,12 @@ def create_job(db: Session, user_id: str, data: ScrapingJobCreate) -> ScrapingJo
             "auto_send": data.auto_send,
             "subject": (data.subject or "").strip(),
             "html_body": (data.html_body or "").strip(),
+            "followups": data.followups,
         },
         outreach_status="off" if data.outreach_mode == "off" else "running",
         outreach_auto_send=data.outreach_mode != "review",
         outreach_daily_limit=data.outreach_daily_limit,
+        outreach_email_account_id=own_email_account_id(db, user_id, data.outreach_email_account_id),
     )
     db.add(job)
     db.flush()

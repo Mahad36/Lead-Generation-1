@@ -23,7 +23,6 @@ export default function SettingsPage() {
   const [serviceName, setServiceName] = useState("");
   const [serviceDesc, setServiceDesc] = useState("");
   const [aiKey, setAiKey] = useState("");
-  const [googleSecret, setGoogleSecret] = useState("");
   const [apifyToken, setApifyToken] = useState("");
   const [replacingApify, setReplacingApify] = useState(false);
   const [testingAi, setTestingAi] = useState(false);
@@ -60,12 +59,10 @@ export default function SettingsPage() {
     } = s;
     const body: Record<string, unknown> = { ...rest };
     if (aiKey.trim()) body.ai_api_key = aiKey.trim();
-    if (googleSecret.trim()) body.google_client_secret = googleSecret.trim();
     if (apifyToken.trim()) body.apify_token = apifyToken.trim();
     const updated = await api("/api/settings", { method: "PUT", body: JSON.stringify(body) });
     setS(updated);
     setAiKey("");
-    setGoogleSecret("");
     setApifyToken("");
     setReplacingApify(false);
     toast.success("Settings saved");
@@ -88,7 +85,6 @@ export default function SettingsPage() {
   const tabs = [
     { id: "workspace", label: "Workspace" },
     { id: "sending", label: "Sending" },
-    { id: "gmail", label: "Gmail" },
     { id: "ai", label: "AI setup" },
     { id: "apify", label: "Google Maps leads" },
   ];
@@ -133,7 +129,26 @@ export default function SettingsPage() {
             </p>
           </div>
           <div><Label>Target industries</Label><Input value={s.target_industries || ""} onChange={(e) => set("target_industries", e.target.value)} /></div>
-          <div><Label>Signature</Label><Textarea value={s.default_signature} onChange={(e) => set("default_signature", e.target.value)} /></div>
+          <div>
+            <Label>Email signature</Label>
+            <Textarea
+              rows={5}
+              value={s.default_signature || ""}
+              placeholder={"Your Name\nFounder, Your Company\nyourwebsite.com\n+1 555 123 4567"}
+              onChange={(e) => set("default_signature", e.target.value)}
+            />
+            <p className="mt-1 text-xs text-muted">
+              Added under every email you send: audit emails, campaign emails using {"{{signature}}"} in the template,
+              and replies from the Replies page. One line per row; web and email addresses become links. Kept as plain
+              text (no logo) so cold emails look personal and stay out of the Promotions tab.
+            </p>
+            {(s.default_signature || "").trim() ? (
+              <div className="mt-2 rounded-lg border border-border bg-card p-3 text-sm">
+                <div className="mb-1 text-xs text-muted">Preview</div>
+                <div className="whitespace-pre-line">{s.default_signature.trim()}</div>
+              </div>
+            ) : null}
+          </div>
           <div className="space-y-2">
             <Label>Your services</Label>
             {(s.services || []).map((svc: any, i: number) => (
@@ -161,10 +176,30 @@ export default function SettingsPage() {
       ) : null}
       {tab === "sending" ? (
         <Card className="space-y-3">
-          <p className="text-sm text-muted">This is how many emails go out today. The next batch waits until tomorrow.</p>
-          <div>
-            <Label>Emails per day</Label>
-            <Input type="number" min={1} value={s.default_daily_send_limit} onChange={(e) => set("default_daily_send_limit", Number(e.target.value))} />
+          <p className="text-sm text-muted">This is how many emails go out per working day. The next batch waits for the next one.</p>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div>
+              <Label>Emails per day</Label>
+              <Input type="number" min={1} value={s.default_daily_send_limit} onChange={(e) => set("default_daily_send_limit", Number(e.target.value))} />
+            </div>
+            <div>
+              <Label>Daily limits reset at</Label>
+              <select
+                className="w-full rounded-md border border-border bg-card px-3 py-2 text-sm"
+                value={s.day_start_hour ?? 0}
+                onChange={(e) => set("day_start_hour", Number(e.target.value))}
+              >
+                {Array.from({ length: 24 }, (_, h) => (
+                  <option key={h} value={h}>
+                    {`${String(h).padStart(2, "0")}:00`}
+                    {h === 0 ? " (midnight)" : ""}
+                  </option>
+                ))}
+              </select>
+              <p className="mt-1 text-xs text-muted">
+                The start of your working day (your computer&apos;s time). Sent counts and audit counts go back to 0 then.
+              </p>
+            </div>
           </div>
           <label className="flex items-center gap-2 text-sm">
             <input type="checkbox" checked={s.skip_previously_contacted} onChange={(e) => set("skip_previously_contacted", e.target.checked)} />
@@ -185,6 +220,121 @@ export default function SettingsPage() {
             <Link href="/suppression" className="text-primary underline">
               Unsubscribes
             </Link>
+          </p>
+        </Card>
+      ) : null}
+      {tab === "sending" ? (
+        <Card className="space-y-4">
+          <div>
+            <h2 className="font-medium">Deliverability</h2>
+            <p className="text-sm text-muted">
+              What cold-email tools do, built in. Your outreach flow stays the same; these run alongside it.
+            </p>
+          </div>
+
+          <div className="space-y-2 rounded-lg border border-border p-3">
+            <label className="flex items-start gap-2 text-sm">
+              <input type="checkbox" className="mt-1" checked={!!s.followups_enabled} onChange={(e) => set("followups_enabled", e.target.checked)} />
+              <span>
+                <span className="font-medium">Follow-ups</span>
+                <span className="block text-xs text-muted">
+                  When a lead doesn&apos;t reply, a short follow-up written by Claude goes out in the same email thread,
+                  from the same inbox, without the PDF. They stop as soon as the lead replies, bounces or unsubscribes.
+                  Follow-ups count towards each inbox&apos;s daily limit and go out before new leads.
+                </span>
+              </span>
+            </label>
+            {s.followups_enabled ? (
+              <div className="ml-6 max-w-xs">
+                <Label>Days between emails</Label>
+                <Input
+                  value={s.followup_days ?? "3,5"}
+                  placeholder="3,5"
+                  onChange={(e) => set("followup_days", e.target.value)}
+                />
+                <p className="mt-1 text-xs text-muted">
+                  &quot;3,5&quot; = follow-up 1 three days after the first email, follow-up 2 five days after that. Up to 5.
+                </p>
+              </div>
+            ) : null}
+          </div>
+
+          <div className="space-y-2 rounded-lg border border-border p-3">
+            <label className="flex items-start gap-2 text-sm">
+              <input type="checkbox" className="mt-1" checked={!!s.send_window_enabled} onChange={(e) => set("send_window_enabled", e.target.checked)} />
+              <span>
+                <span className="font-medium">Sending hours</span>
+                <span className="block text-xs text-muted">
+                  Automatic emails go out only in these hours (your computer&apos;s time). Emails ready outside them wait
+                  until the hours start. Pressing Send yourself always sends straight away.
+                </span>
+              </span>
+            </label>
+            {s.send_window_enabled ? (
+              <div className="ml-6 flex flex-wrap items-end gap-3">
+                <div>
+                  <Label>From</Label>
+                  <select
+                    className="rounded-md border border-border bg-card px-3 py-2 text-sm"
+                    value={s.send_window_start ?? 8}
+                    onChange={(e) => set("send_window_start", Number(e.target.value))}
+                  >
+                    {Array.from({ length: 24 }, (_, h) => (
+                      <option key={h} value={h}>{`${String(h).padStart(2, "0")}:00`}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <Label>Until</Label>
+                  <select
+                    className="rounded-md border border-border bg-card px-3 py-2 text-sm"
+                    value={s.send_window_end ?? 19}
+                    onChange={(e) => set("send_window_end", Number(e.target.value))}
+                  >
+                    {Array.from({ length: 24 }, (_, i) => i + 1).map((h) => (
+                      <option key={h} value={h}>{`${String(h % 24).padStart(2, "0")}:00`}</option>
+                    ))}
+                  </select>
+                </div>
+                <label className="flex items-center gap-2 pb-2 text-sm">
+                  <input type="checkbox" checked={!!s.send_weekdays_only} onChange={(e) => set("send_weekdays_only", e.target.checked)} />
+                  Monday to Friday only
+                </label>
+              </div>
+            ) : null}
+          </div>
+
+          <label className="flex items-start gap-2 rounded-lg border border-border p-3 text-sm">
+            <input type="checkbox" className="mt-1" checked={!!s.check_email_domains} onChange={(e) => set("check_email_domains", e.target.checked)} />
+            <span>
+              <span className="font-medium">Skip emails that would bounce</span>
+              <span className="block text-xs text-muted">
+                Before auditing or emailing a lead, checks that the email&apos;s domain can receive mail. Leads that can&apos;t
+                are marked &quot;undeliverable&quot; and skipped, which keeps your bounce rate low.
+              </span>
+            </span>
+          </label>
+
+          <label className="flex items-start gap-2 rounded-lg border border-border p-3 text-sm">
+            <input type="checkbox" className="mt-1" checked={!!s.warmup_enabled} onChange={(e) => set("warmup_enabled", e.target.checked)} />
+            <span>
+              <span className="font-medium">Warm-up between my inboxes</span>
+              <span className="block text-xs text-muted">
+                With 2 or more Gmails connected, they send each other a few natural emails a day during sending hours,
+                rescue them from spam, mark them important and reply to some. Filed under a &quot;Warm-up&quot; label, out of
+                your inbox. Switch it per inbox in Email setup.
+              </span>
+            </span>
+          </label>
+
+          <p className="text-xs text-muted">
+            Also automatic: emails without a chosen inbox rotate across all your connected Gmails; a newly added Gmail
+            starts at 5 emails a day and rises by 2 a day up to its limit; an inbox pauses itself if more than 5% of its
+            recent emails bounce. See each inbox in{" "}
+            <Link href="/email-accounts" className="text-primary underline">
+              Email setup
+            </Link>
+            .
           </p>
         </Card>
       ) : null}
@@ -291,55 +441,6 @@ export default function SettingsPage() {
           <Button variant="secondary" disabled={testingAi} onClick={() => testAi().catch((e) => toast.error(e.message))}>
             {testingAi ? "Testing…" : "Test AI connection"}
           </Button>
-        </Card>
-      ) : null}
-      {tab === "gmail" ? (
-        <Card className="space-y-3">
-          <p className="text-sm text-muted">
-            Create an OAuth client in Google Cloud Console (Gmail send + user email scopes), then paste the credentials here.
-            After saving, connect your inbox on the Email accounts page.
-          </p>
-          {s.google_oauth_configured ? (
-            <div className="flex items-center gap-2 text-sm">
-              <CheckCircle2 className="h-5 w-5 text-emerald-600" />
-              <span className="font-medium">Google OAuth is set up</span>
-              <Badge tone="ok">Connected</Badge>
-              <span className="text-muted">Paste a new Client Secret below only to replace it.</span>
-            </div>
-          ) : (
-            <p className="text-sm">Gmail connect stays disabled until both Client ID and Client Secret are saved.</p>
-          )}
-          <div className="space-y-2">
-            <Label>Authorized redirect URIs</Label>
-            <p className="text-xs text-muted">
-              In Google Cloud Console → APIs & Services → Credentials → your OAuth client, add every URI below.
-              `localhost` and `127.0.0.1` are different. A port mismatch causes Error 400: redirect_uri_mismatch.
-            </p>
-            {(s.google_redirect_uris?.length ? s.google_redirect_uris : [s.google_redirect_uri]).filter(Boolean).map((uri: string) => (
-              <Input key={uri} readOnly value={uri} />
-            ))}
-          </div>
-          <div>
-            <Label>Google Client ID</Label>
-            <Input value={s.google_client_id || ""} onChange={(e) => set("google_client_id", e.target.value)} />
-          </div>
-          <p className="text-sm">
-            After saving,{" "}
-            <Link href="/email-accounts" className="text-primary underline">
-              connect Gmail
-            </Link>
-            .
-          </p>
-          <div>
-            <Label>Google Client Secret</Label>
-            <Input
-              type="password"
-              autoComplete="new-password"
-              placeholder={s.google_client_secret_set ? "Saved — paste a new secret to replace it" : "GOCSPX-..."}
-              value={googleSecret}
-              onChange={(e) => setGoogleSecret(e.target.value)}
-            />
-          </div>
         </Card>
       ) : null}
       {tab === "apify" ? (

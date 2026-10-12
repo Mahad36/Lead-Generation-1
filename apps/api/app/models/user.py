@@ -46,6 +46,17 @@ class UserSettings(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     contact_email: Mapped[str] = mapped_column(String(320), default="", nullable=False)
     contact_phone: Mapped[str] = mapped_column(String(64), default="", nullable=False)
     default_signature: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    # Deliverability (all on by default): follow-ups, sending hours, address checks, warm-up
+    followups_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    followup_days: Mapped[str] = mapped_column(String(64), default="3,5", nullable=False)  # days after the previous email
+    send_window_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    send_window_start: Mapped[int] = mapped_column(Integer, default=8, nullable=False)  # local hour
+    send_window_end: Mapped[int] = mapped_column(Integer, default=19, nullable=False)
+    send_weekdays_only: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    # Daily limits reset at this local hour (0 = midnight; 17 for a 5 pm - 2 am working day)
+    day_start_hour: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    check_email_domains: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    warmup_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     target_industries: Mapped[str] = mapped_column(Text, default="", nullable=False)
 
     scrape_max_results: Mapped[int] = mapped_column(Integer, default=200, nullable=False)

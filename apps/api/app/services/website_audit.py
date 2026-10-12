@@ -34,6 +34,7 @@ from app.services.audit import write_audit
 from app.services.audit_ai import generate_audit_email, generate_audit_report
 from app.services.audit_pdf import build_audit_pdf, pdf_filename
 from app.services.crawler import crawl_website
+from app.services.deliverability import WAITING_FOR_INBOX, WAITING_FOR_WINDOW
 from app.services.gmail import EmailAttachment, GmailSendError, daily_limit_reached, send_gmail_message
 from app.services.integrations import resolve_ai_config
 from app.services.performance import PerformanceBlockedError, PerformanceError, measure_performance
@@ -43,6 +44,7 @@ from app.services.screenshots import ScreenshotError, capture_screenshots
 from app.services.platform_detection import detect_platform
 from app.services.suppression import is_suppressed
 from app.utils.normalize import normalize_email, normalize_url
+from app.utils.signature import append_signature, drop_ai_sign_off, signature_html
 
 logger = get_logger("website_audit")
 
@@ -65,6 +67,8 @@ STEP_LABELS = {
 }
 ACTIVE_STATUSES = {"queued", *STEPS, "sending"}
 WAITING_FOR_LIMIT = "Waiting: daily send limit reached (sends automatically when allowed)"
+# Every reason an automatic send waits; auto_audits.send_waiting retries them all
+WAITING_STEPS = (WAITING_FOR_LIMIT, WAITING_FOR_WINDOW, WAITING_FOR_INBOX)
 SENDABLE_STATUSES = {"ready", "send_failed", "sent"}
 STALE_AFTER = timedelta(minutes=20)
 
@@ -159,7 +163,21 @@ def free_offers(settings: UserSettings | None) -> list[str]:
     return [line for line in lines if line] or DEFAULT_FREE_OFFERS
 
 
-def _sender_info(db: Session, user_id: str) -> dict:
+def _audit_signature(db: Session, audit: WebsiteAudit | None, settings: UserSettings | None) -> str:
+    """The signature for this audit's email: the one from Settings, unless its campaign switched it off."""
+    signature = settings.default_signature if settings else ""
+    if not signature or audit is None:
+        return signature
+    try:
+        from app.services.campaigns import campaign_adds_signature
+
+        return signature if campaign_adds_signature(db, audit) else ""
+    except Exception as exc:  # bookkeeping must never block an audit
+        logger.warning("campaign_signature_check_failed", audit_id=audit.id, error=str(exc))
+        return signature
+
+
+def _sender_info(db: Session, user_id: str, audit: WebsiteAudit | None = None) -> dict:
     settings = db.query(UserSettings).filter(UserSettings.user_id == user_id).first()
     services = [s.name for s in db.query(UserService).filter(UserService.user_id == user_id).all()]
     return {
@@ -170,6 +188,8 @@ def _sender_info(db: Session, user_id: str) -> dict:
         "contact_email": settings.contact_email if settings else "",
         "services": services,
         "free_offers": free_offers(settings),
+        # The signature (name, title, links) is added under the email when it is sent.
+        "signature_added": bool(signature_html(_audit_signature(db, audit, settings))),
     }
 
 
@@ -223,6 +243,7 @@ def serialize_audit(audit: WebsiteAudit, *, full: bool = True) -> dict:
         "error_message": audit.error_message,
         "website_url": audit.website_url,
         "recipient_email": audit.recipient_email,
+        "email_account_id": audit.email_account_id,  # sends from this account (none: the default account)
         "auto_send": audit.auto_send,
         "trigger": audit.trigger,
         "overall_score": audit.overall_score,
@@ -295,6 +316,8 @@ def start_audit(
         if not recipient:
             raise HTTPException(status_code=400, detail="Add the customer's email address to send automatically.")
         email_account_id = resolve_email_account(db, user_id, email_account_id).id
+    elif email_account_id:
+        email_account_id = resolve_email_account(db, user_id, email_account_id, require_connected=False).id
 
     audit = WebsiteAudit(
         user_id=user_id,
@@ -505,7 +528,7 @@ def run_audit(db: Session, audit_id: str) -> str:
 
         current = "generating_pdf"
         _set_step(db, audit, "generating_pdf")
-        sender = _sender_info(db, audit.user_id)
+        sender = _sender_info(db, audit.user_id, audit)
         _build_pdf(audit, lead, sender, screenshots)
         db.commit()
 
@@ -562,8 +585,11 @@ def run_audit(db: Session, audit_id: str) -> str:
             log.warning("audit_auto_send_failed", error=str(getattr(exc, "detail", exc)))
             audit = db.get(WebsiteAudit, audit_id)
             if isinstance(exc, HTTPException) and exc.status_code == 429:
-                # Sent automatically by the poller once the daily limit allows (see auto_audits.send_waiting).
-                audit.step = WAITING_FOR_LIMIT
+                # Sent automatically by the poller once allowed: daily limit, sending hours or a paused inbox
+                # (see auto_audits.send_waiting).
+                from app.services.deliverability import waiting_step
+
+                audit.step = waiting_step(exc, WAITING_FOR_LIMIT)
                 db.commit()
     _sync_campaign(db, audit)
     return audit.status
@@ -668,7 +694,7 @@ def redraft_email(db: Session, audit_id: str) -> str:
     try:
         if not lead:
             raise HTTPException(status_code=404, detail="The lead was deleted.")
-        sender = _sender_info(db, audit.user_id)
+        sender = _sender_info(db, audit.user_id, audit)
         if not audit.pdf_data:
             _build_pdf(audit, lead, sender, _saved_screenshots(audit.id))
         email = generate_audit_email(
@@ -727,6 +753,26 @@ def _html_to_text(html: str) -> str:
     return text
 
 
+def _followups_for(db: Session, audit: WebsiteAudit, settings: UserSettings | None) -> bool:
+    """Follow-ups after this audit email: the setting, and the campaign's / scrape file's own switch."""
+    if settings is not None and not settings.followups_enabled:
+        return False
+    try:
+        if audit.trigger == "campaign":
+            from app.services.campaigns import campaign_followups, campaign_for_audit
+
+            return campaign_followups(campaign_for_audit(db, audit))
+        if audit.trigger == "auto":
+            from app.models import ScrapingJob
+
+            lead = db.get(Lead, audit.lead_id)
+            job = db.get(ScrapingJob, lead.scraping_job_id) if lead and lead.scraping_job_id else None
+            return not job or (job.extra or {}).get("followups", True) is not False
+    except Exception as exc:  # bookkeeping must never block a send
+        logger.warning("followup_setting_check_failed", audit_id=audit.id, error=str(exc))
+    return True
+
+
 def send_audit(
     db: Session,
     user_id: str,
@@ -737,8 +783,10 @@ def send_audit(
     email_html: str | None = None,
     email_account_id: str | None = None,
     meta: dict | None = None,
+    manual: bool = False,
 ) -> WebsiteAudit:
-    from app.services.campaigns import resolve_email_account
+    """Send the audit email with its PDF. Automatic sends (manual=False) wait for the sending hours."""
+    from app.services import deliverability
     from app.services.tracking import (
         new_rfc_message_id,
         open_pixel_html,
@@ -770,23 +818,34 @@ def send_audit(
     if (not settings or settings.respect_suppression_list) and is_suppressed(db, user_id, recipient):
         raise HTTPException(status_code=400, detail="This address is on your suppression list (unsubscribed).")
 
-    account: EmailAccount = resolve_email_account(db, user_id, email_account_id or audit.email_account_id)
+    problem = deliverability.address_problem(db, user_id, recipient)
+    if problem:
+        raise HTTPException(status_code=400, detail=problem)
+    if not manual:
+        deliverability.require_send_window(db, user_id)
+    # The chosen inbox, or (none chosen / "" = automatic) the connected inbox with the most room today
+    account: EmailAccount = deliverability.sending_account(
+        db,
+        user_id,
+        (email_account_id if email_account_id is not None else audit.email_account_id) or None,
+        automatic=not manual,
+    )
     if daily_limit_reached(db, account):
-        raise HTTPException(
-            status_code=429,
-            detail=(
-                f"Daily sending limit reached for {account.email_address} ({account.daily_limit} per day). "
-                "It resets tomorrow; change it in AI & settings → Sending."
-            ),
-        )
+        raise deliverability.limit_reached_error(account)
 
     unsubscribe = unsubscribe_url(user_id, recipient)
     rfc_message_id = new_rfc_message_id(account.email_address)
+    signature = _audit_signature(db, audit, settings)
+    sent_body = body_html
+    if signature_html(signature):
+        # Drafts written before the signature was set end with the name/company: the signature carries them now.
+        sent_body = drop_ai_sign_off(body_html, settings.sender_name, settings.company_name)
+    signed_html, signed_text = append_signature(sent_body, _html_to_text(sent_body), signature)
     html_body = (
-        f"{body_html}"
+        f"{signed_html}"
         f'<p style="font-size:12px;color:#666">Not interested? <a href="{unsubscribe}">Unsubscribe</a></p>'
     )
-    text_body = f"{_html_to_text(body_html)}\n\nUnsubscribe: {unsubscribe}"
+    text_body = f"{signed_text}\n\nUnsubscribe: {unsubscribe}"
     tracked = tracks_opens(db, user_id)  # adds the open-tracking image; the visible email is the same
 
     message = EmailMessage(
@@ -800,6 +859,7 @@ def send_audit(
         text_body=text_body,
         status="sending",
         rfc_message_id=rfc_message_id,
+        followups_enabled=_followups_for(db, audit, settings),
     )
     db.add(message)
     audit.email_subject, audit.email_html, audit.recipient_email = subject, body_html, recipient

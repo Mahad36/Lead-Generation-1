@@ -72,8 +72,17 @@ app.include_router(tracking.router)
 
 
 def _start_scheduler() -> None:
+    from app.database import get_session
+    from app.services.deliverability import load_day_start_hour
     from app.services.scheduler import start_inline_scheduler
 
+    db = get_session()
+    try:
+        load_day_start_hour(db)  # when daily limits reset (AI & settings -> Sending)
+    except Exception:
+        pass  # before the first migration: midnight
+    finally:
+        db.close()
     start_inline_scheduler()
 
 

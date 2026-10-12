@@ -16,9 +16,10 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.logging_config import get_logger
-from app.models import ConversationMessage, EmailAccount, EmailMessage, Lead
+from app.models import ConversationMessage, EmailAccount, EmailMessage, Lead, UserSettings
 from app.services.gmail import GmailSendError, daily_limit_reached, send_gmail_message
 from app.services.tracking import new_rfc_message_id, open_pixel_html, tracking_summary, tracks_opens
+from app.utils.signature import append_signature
 
 logger = get_logger("conversations")
 
@@ -84,7 +85,7 @@ def add_message(
         body_text=body_text[:20000],
         rfc_message_id=rfc_message_id[:255],
         occurred_at=occurred_at,
-        read_at=None if direction == "in" and source != "auto" else occurred_at,  # robots are never "new"
+        read_at=None if direction == "in" else occurred_at,
     )
     db.add(item)
     db.flush()
@@ -123,8 +124,7 @@ def list_threads(db: Session, user_id: str, *, unread_only: bool = False, lead_i
     threads = []
     for root_id, items in grouped.items():
         root = roots.get(root_id)
-        # Replies lists people who answered; on a lead's page an automatic reply alone is enough to show it.
-        if not root or not any(m.direction == "in" and (lead_id or m.source != "auto") for m in items):
+        if not root or not any(m.direction == "in" for m in items):
             continue
         unread = sum(1 for m in items if m.direction == "in" and not m.read_at)
         if unread_only and not unread:
@@ -268,9 +268,7 @@ def send_reply(db: Session, user_id: str, root_id: str, body: str) -> dict:
         .order_by(ConversationMessage.occurred_at.asc())
         .all()
     )
-    last_in = next((m for m in reversed(items) if m.direction == "in" and m.source != "auto"), None) or next(
-        (m for m in reversed(items) if m.direction == "in"), None
-    )
+    last_in = next((m for m in reversed(items) if m.direction == "in"), None)
     to = (last_in.from_email if last_in else "") or root.recipient_email
     # Gmail only threads messages whose subjects match, so answer under THEIR subject ("Thank You Re: ..." too),
     # like Gmail's own Reply button does.
@@ -296,6 +294,9 @@ def send_reply(db: Session, user_id: str, root_id: str, body: str) -> dict:
             + "</blockquote>"
         )
     html_reply = "".join(f"<p>{escape(p).replace(chr(10), '<br>')}</p>" for p in body.split("\n\n") if p.strip())
+    # Your signature goes under your answer and above their quoted message, as in Gmail.
+    settings = db.query(UserSettings).filter(UserSettings.user_id == user_id).first()
+    html_reply, signed_text = append_signature(html_reply, body, settings.default_signature if settings else "")
 
     message = EmailMessage(
         user_id=user_id,
@@ -305,7 +306,7 @@ def send_reply(db: Session, user_id: str, root_id: str, body: str) -> dict:
         recipient_name=root.recipient_name,
         subject=subject,
         html_body=html_reply + quoted_html,
-        text_body=body + quoted_text,
+        text_body=signed_text + quoted_text,
         status="sending",
         rfc_message_id=rfc_message_id,
     )
@@ -318,7 +319,7 @@ def send_reply(db: Session, user_id: str, root_id: str, body: str) -> dict:
             to=to,
             subject=subject,
             html_body=html_reply + quoted_html + (open_pixel_html(message.id) if tracks_opens(db, user_id) else ""),
-            text_body=body + quoted_text,
+            text_body=signed_text + quoted_text,
             headers=headers,
         )
     except GmailSendError as exc:
@@ -345,3 +346,89 @@ def send_reply(db: Session, user_id: str, root_id: str, body: str) -> dict:
     db.commit()
     logger.info("conversation_reply_sent", root_id=root.id, lead_id=root.lead_id)
     return get_thread(db, user_id, root.id)
+
+
+def replied_leads(db: Session, user_id: str, q: str | None = None) -> list[dict]:
+    """Every lead who answered one of your emails, latest reply first."""
+    from app.services.leads import lead_file_info
+
+    replies = (
+        db.query(ConversationMessage)
+        .filter(
+            ConversationMessage.user_id == user_id,
+            ConversationMessage.direction == "in",
+        )
+        .order_by(ConversationMessage.occurred_at.asc())
+        .all()
+    )
+    roots = {r.id: r for r in db.query(EmailMessage).filter(EmailMessage.id.in_({m.root_message_id for m in replies}))}
+    by_lead: dict[str, list[ConversationMessage]] = {}
+    for m in replies:
+        root = roots.get(m.root_message_id)
+        key = m.lead_id or (root.lead_id if root else None) or f"email:{m.from_email}"
+        by_lead.setdefault(key, []).append(m)
+    # Replies found before conversations were saved: the outreach email is marked replied, but has no messages.
+    for root in db.query(EmailMessage).filter(
+        EmailMessage.user_id == user_id, EmailMessage.replied_at.isnot(None), EmailMessage.lead_id.isnot(None)
+    ):
+        by_lead.setdefault(root.lead_id, [])
+        roots.setdefault(root.id, root)
+    lead_ids = [k for k in by_lead if not k.startswith("email:")]
+    leads = {lead.id: lead for lead in db.query(Lead).filter(Lead.user_id == user_id, Lead.id.in_(lead_ids))}
+    # Your latest message per conversation, to show whose turn it is.
+    last_out: dict[str, datetime] = {}
+    for root_id, at in (
+        db.query(ConversationMessage.root_message_id, func.max(ConversationMessage.occurred_at))
+        .filter(ConversationMessage.user_id == user_id, ConversationMessage.direction == "out")
+        .group_by(ConversationMessage.root_message_id)
+    ):
+        last_out[root_id] = at
+
+    needle = (q or "").strip().lower()
+    rows = []
+    for key, items in by_lead.items():
+        lead = leads.get(key)
+        if lead is None and not key.startswith("email:"):
+            continue  # the lead was deleted
+        lead_roots =[r for r in roots.values() if lead and r.lead_id == lead.id]
+        if items:
+            first, last = items[0], items[-1]
+            root_id = last.root_message_id
+            first_at, last_at = first.occurred_at, last.occurred_at
+            snippet, email = _snippet(last.body_text), last.from_email
+        else:
+            replied = sorted((r for r in lead_roots if r.replied_at), key=lambda r: r.replied_at)
+            if not replied:
+                continue
+            root_id, first_at, last_at = replied[-1].id, replied[0].replied_at, replied[-1].replied_at
+            snippet, email = "", replied[-1].recipient_email
+        root = roots.get(root_id)
+        you_last = last_out.get(root_id)
+        row = {
+            "lead_id": lead.id if lead else None,
+            "root_id": root_id if items else None,
+            "business_name": (lead.business_name if lead else "") or (root.recipient_name if root else "") or email,
+            "contact_name": lead.contact_name if lead else "",
+            "email": (lead.primary_email if lead else "") or email,
+            "phone": lead.primary_phone if lead else "",
+            "website_url": lead.website_url if lead else "",
+            "category": lead.category if lead else "",
+            "city": lead.city if lead else "",
+            "country": lead.country if lead else "",
+            "file_name": lead_file_info(db, lead)["file_name"] if lead else "",
+            "subject": root.subject if root else "",
+            "first_replied_at": first_at,
+            "last_reply_at": last_at,
+            "last_reply_snippet": snippet,
+            "replies": len(items),
+            "unread": sum(1 for m in items if not m.read_at),
+            "you_answered": bool(you_last and you_last >= last_at),
+            "your_last_answer_at": you_last,
+        }
+        if needle and needle not in " ".join(
+            str(row[k] or "") for k in ("business_name", "contact_name", "email", "website_url", "city", "category")
+        ).lower():
+            continue
+        rows.append(row)
+    rows.sort(key=lambda r: r["last_reply_at"], reverse=True)
+    return rows

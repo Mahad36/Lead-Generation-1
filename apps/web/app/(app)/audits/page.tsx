@@ -1,5 +1,6 @@
 "use client";
 
+import { SendFrom } from "@/components/send-from";
 import { ACTIVE, Audit, AuditPanel, statusTone } from "@/components/audit-panel";
 import { TrackingBadges } from "@/components/tracking-badges";
 import { Badge, Button, Card, Empty, Input, Label } from "@/components/ui";
@@ -10,7 +11,7 @@ import Link from "next/link";
 import { FormEvent, useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
 
-const EMPTY_FORM = { business_name: "", website_url: "", email: "", city: "", category: "", auto_send: false };
+const EMPTY_FORM = { business_name: "", website_url: "", email: "", city: "", category: "", auto_send: false, email_account_id: "" };
 
 export default function WebsiteAuditsPage() {
   const [form, setForm] = useState(EMPTY_FORM);
@@ -110,6 +111,11 @@ export default function WebsiteAuditsPage() {
             <input type="checkbox" checked={form.auto_send} onChange={set("auto_send")} />
             Send the email automatically when the audit is ready (otherwise you review it first)
           </label>
+          <SendFrom
+            className="md:col-span-2 md:max-w-md"
+            value={form.email_account_id}
+            onChange={(id) => setForm({ ...form, email_account_id: id })}
+          />
           <div className="md:col-span-2">
             <Button type="submit" disabled={busy}>
               {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : null}

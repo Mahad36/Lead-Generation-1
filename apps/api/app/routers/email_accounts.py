@@ -49,9 +49,13 @@ def list_accounts(user: User = Depends(get_current_user), db: Session = Depends(
         .order_by(EmailAccount.created_at.desc())
         .all()
     )
+    from app.services.deliverability import effective_daily_limit
+    from app.services.warmup import warmup_stats
+
     out = []
     for account in accounts:
         sent_today = sent_today_count(db, account)
+        limit_today = effective_daily_limit(account)
         status = account.status
         if status == "connected" and "expired" in (account.last_error or "").lower():
             status = "expired"
@@ -62,8 +66,16 @@ def list_accounts(user: User = Depends(get_current_user), db: Session = Depends(
                 "display_name": account.display_name,
                 "status": status,
                 "daily_limit": account.daily_limit,
+                # A new inbox ramps up: today's limit is lower than daily_limit until it catches up
+                "limit_today": limit_today,
+                "ramping_up": limit_today < (account.daily_limit or 0),
                 "sent_today": sent_today,
-                "remaining_today": max(account.daily_limit - sent_today, 0),
+                "remaining_today": 0 if account.paused_reason else max(limit_today - sent_today, 0),
+                "paused_reason": account.paused_reason,
+                "paused_at": account.paused_at,
+                "warmup_enabled": account.warmup_enabled,
+                "warmup": warmup_stats(db, account) if _smtp_payload(account) else None,
+                "health": account.health or {},
                 "last_successful_send_at": account.last_successful_send_at,
                 "last_error": account.last_error,
                 "provider": account.provider,
@@ -209,6 +221,71 @@ def set_default_account(
     account.is_default = True
     db.commit()
     return {"message": "Default sending account updated"}
+
+
+def _own_account(db: Session, user: User, account_id: str) -> EmailAccount:
+    account = db.query(EmailAccount).filter(EmailAccount.id == account_id, EmailAccount.user_id == user.id).first()
+    if not account:
+        raise HTTPException(status_code=404, detail="Account not found")
+    return account
+
+
+@router.post("/{account_id}/resume")
+def resume_account(account_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Resume an inbox that paused itself after too many bounces (and the campaigns waiting for it)."""
+    from app.models import Campaign
+
+    account = _own_account(db, user, account_id)
+    account.paused_reason, account.paused_at = "", None
+    waiting = (
+        db.query(Campaign)
+        .filter(Campaign.user_id == user.id, Campaign.status == "paused", Campaign.paused_reason == "inbox_paused_bounces")
+        .all()
+    )
+    for campaign in waiting:
+        campaign.status, campaign.paused_reason = "running", ""
+    db.commit()
+    if waiting:
+        from app.services.scraping_jobs import enqueue_task
+        from workers.tasks.campaigns import process_campaign_queue
+
+        for campaign in waiting:
+            enqueue_task(process_campaign_queue, campaign.id)
+    from app.services.auto_audits import request_poll
+
+    request_poll()  # emails waiting for this inbox go out
+    return {"message": f"{account.email_address} is sending again"}
+
+
+class WarmupIn(BaseModel):
+    enabled: bool
+
+
+@router.post("/{account_id}/warmup")
+def set_warmup(account_id: str, payload: WarmupIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    account = _own_account(db, user, account_id)
+    account.warmup_enabled = payload.enabled
+    db.commit()
+    return {"warmup_enabled": account.warmup_enabled}
+
+
+@router.post("/{account_id}/domain-check")
+def check_domain(account_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """SPF / DKIM / DMARC for the inbox's domain."""
+    from app.services.warmup import domain_check
+
+    return domain_check(db, _own_account(db, user, account_id))
+
+
+@router.post("/{account_id}/placement-test")
+def placement_test(account_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Send your latest outreach email to your other inboxes and report Inbox / Promotions / Spam (takes ~2 min)."""
+    from app.services.warmup import start_placement_test
+
+    account = _own_account(db, user, account_id)
+    if account.status != "connected":
+        raise HTTPException(status_code=400, detail="Reconnect this inbox first.")
+    return start_placement_test(db, account)
 
 
 @router.post("/{account_id}/test")

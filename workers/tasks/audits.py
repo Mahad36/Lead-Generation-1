@@ -53,3 +53,10 @@ def check_inboxes_task() -> dict:
         return check_all_inboxes(db)
     finally:
         db.close()
+
+
+@celery_app.task(name="workers.tasks.audits.deliverability_round")
+def deliverability_round_task() -> dict:
+    from app.services.scheduler import deliverability_round
+
+    return deliverability_round()

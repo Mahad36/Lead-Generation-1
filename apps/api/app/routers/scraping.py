@@ -110,5 +110,12 @@ def file_outreach(
     from app.services.auto_audits import set_job_outreach
 
     job = scraping_service.get_job(db, user.id, job_id)
-    set_job_outreach(db, job, action=payload.action, auto_send=payload.auto_send, daily_limit=payload.daily_limit)
+    set_job_outreach(
+        db,
+        job,
+        action=payload.action,
+        auto_send=payload.auto_send,
+        daily_limit=payload.daily_limit,
+        email_account_id=payload.email_account_id if "email_account_id" in payload.model_fields_set else ...,
+    )
     return scraping_service.serialize_job(db, scraping_service.get_job(db, user.id, job_id))

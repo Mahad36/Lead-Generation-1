@@ -15,6 +15,7 @@ import {
   Moon,
   Settings,
   Sun,
+  UserCheck,
   Users,
 } from "lucide-react";
 import Link from "next/link";
@@ -27,6 +28,7 @@ const NAV = [
   { href: "/scraping", label: "Scraping / Leads", icon: Map },
   { href: "/leads", label: "Lead files", icon: Users },
   { href: "/replies", label: "Replies", icon: MailOpen },
+  { href: "/replied-leads", label: "Replied leads", icon: UserCheck },
   { href: "/audits", label: "Website audits", icon: FileSearch },
   { href: "/email-templates", label: "Templates", icon: FileText },
   { href: "/campaigns", label: "Campaigns", icon: Megaphone },

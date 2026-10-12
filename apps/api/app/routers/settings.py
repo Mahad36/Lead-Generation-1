@@ -164,6 +164,10 @@ def update_settings(
     )
     db.commit()
     db.refresh(settings)
+    if "day_start_hour" in data:
+        from app.utils.dates import set_day_start_hour
+
+        set_day_start_hour(settings.day_start_hour)  # daily limits now reset at this hour
     return _payload(db, user)
 
 

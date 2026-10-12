@@ -1,6 +1,7 @@
 "use client";
 
 import { OutreachTable } from "@/components/outreach";
+import { automaticLabel, useEmailAccounts } from "@/components/send-from";
 import { Badge, Button, Card, Input, Textarea } from "@/components/ui";
 import { api } from "@/lib/api";
 import { CAMPAIGN_LEAD_STATUS, CAMPAIGN_STATUS } from "@/lib/constants";
@@ -23,6 +24,7 @@ export default function CampaignDetailPage() {
   const [editing, setEditing] = useState<string | null>(null);
   const [draft, setDraft] = useState({ subject: "", html_body: "" });
   const [busy, setBusy] = useState(false);
+  const accounts = useEmailAccounts();
 
   async function load() {
     const [c, l] = await Promise.all([api(`/api/campaigns/${id}`), api<any[]>(`/api/campaigns/${id}/leads`)]);
@@ -53,6 +55,20 @@ export default function CampaignDetailPage() {
       await api(`/api/campaigns/${id}/${path}`, { method: "POST" });
       toast.success(label);
       await load();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function changeAccount(accountId: string) {
+    setBusy(true);
+    try {
+      await api(`/api/campaigns/${id}/email-account`, { method: "POST", body: JSON.stringify({ email_account_id: accountId }) });
+      const address = accounts?.find((a) => a.id === accountId)?.email_address;
+      toast.success(`The rest of this campaign sends from ${address || "your default account"}`);
+      await load();
+    } catch (e) {
+      toast.error((e as Error).message);
     } finally {
       setBusy(false);
     }
@@ -135,6 +151,26 @@ export default function CampaignDetailPage() {
           </Button>
         ) : null}
       </div>
+      <label className="flex flex-wrap items-center gap-2 text-sm">
+        <span className="text-muted">Sending from</span>
+        <select
+          className="rounded-md border border-border bg-card px-2 py-1 text-sm"
+          value={campaign.rotate ? "" : campaign.email_account_id || ""}
+          disabled={busy || accounts === null || ["completed", "stopped"].includes(campaign.status)}
+          onChange={(e) => changeAccount(e.target.value)}
+        >
+          <option value="">{automaticLabel(accounts)}</option>
+          {(accounts || [])
+            .filter((a) => a.status === "connected" || a.id === campaign.email_account_id)
+            .map((a) => (
+              <option key={a.id} value={a.id}>
+                {a.email_address} · {a.remaining_today} of {a.limit_today ?? a.daily_limit} left today
+                {a.status === "connected" ? "" : " (not connected)"}
+              </option>
+            ))}
+        </select>
+        <span className="text-xs text-muted">Emails not sent yet switch to the account you pick.</span>
+      </label>
       {campaign.paused_reason ? <p className="text-sm text-danger">{campaign.paused_reason.replaceAll("_", " ")}</p> : null}
       {writing && sending && !audit ? <p className="text-sm text-muted">Writing personalized emails, then sending them one by one.</p> : null}
       {audit && sending ? (
