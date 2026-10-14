@@ -221,6 +221,9 @@ def get_thread(db: Session, user_id: str, root_id: str) -> dict:
         "email": root.recipient_email,
         "website_url": lead.website_url if lead else "",
         "subject": root.subject,
+        # Replies always go from the inbox this conversation started from (same thread in their mailbox)
+        "account_email": account.email_address if account else "",
+        "account_connected": bool(account and account.status == "connected"),
         "messages": messages,
     }
 

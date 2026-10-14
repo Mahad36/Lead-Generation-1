@@ -38,6 +38,8 @@ type Message = Tracking & {
 };
 
 type Thread = Omit<ThreadSummary, "last_at" | "last_direction" | "last_snippet" | "unread" | "messages"> & {
+  account_email?: string; // replies go from this inbox
+  account_connected?: boolean;
   messages: Message[];
 };
 
@@ -159,7 +161,7 @@ export function ConversationView({ rootId, onChange }: { rootId: string; onChang
         <Textarea
           rows={5}
           value={draft}
-          placeholder={`Reply to ${name}... It goes out from your mailbox as a reply in the same thread.`}
+          placeholder={`Reply to ${name}... It goes out from ${thread.account_email || "your mailbox"} as a reply in the same thread.`}
           onChange={(e) => setDraft(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
@@ -169,7 +171,15 @@ export function ConversationView({ rootId, onChange }: { rootId: string; onChang
           }}
         />
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <span className="text-xs text-muted">Ctrl+Enter to send. Their last message is quoted underneath, like in Gmail.</span>
+          <span className="text-xs text-muted">
+            {thread.account_email ? (
+              <>
+                Sending from <span className="font-medium text-foreground">{thread.account_email}</span>
+                {thread.account_connected === false ? " (not connected: reconnect it in Email setup to reply)" : ""} ·{" "}
+              </>
+            ) : null}
+            Ctrl+Enter to send. Their last message is quoted underneath, like in Gmail.
+          </span>
           <Button disabled={sending || !draft.trim()} onClick={send}>
             {sending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
             Send reply
