@@ -18,6 +18,8 @@ type Alert = {
   since: string | null;
   last_seen_at: string | null;
   resolved_at: string | null;
+  acknowledged: boolean;
+  holds_sending: boolean;
 };
 type Alerts = { open: Alert[]; resolved: Alert[] };
 
@@ -48,8 +50,15 @@ const MANUAL = [
   "Own domain: add it to Google Postmaster Tools (postmaster.google.com). Domain reputation should stay High or Medium and the spam rate under 0.1%. Gmail only shares these there, not with apps.",
 ];
 
-function AlertCard({ alert }: { alert: Alert }) {
+function AlertCard({ alert, onChange }: { alert: Alert; onChange?: () => void }) {
   const resolved = !!alert.resolved_at;
+  const acknowledge = (undo: boolean) =>
+    api(`/api/health-alerts/${alert.id}/${undo ? "unacknowledge" : "acknowledge"}`, { method: "POST" })
+      .then(() => {
+        toast.success(undo ? "This warning holds sending again" : "Reviewed: this warning no longer holds sending");
+        onChange?.();
+      })
+      .catch((e) => toast.error(e.message));
   return (
     <Card className={resolved ? "opacity-70" : alert.severity === "critical" ? "border-red-400" : "border-yellow-400"}>
       <div className="flex flex-wrap items-start justify-between gap-2">
@@ -63,6 +72,8 @@ function AlertCard({ alert }: { alert: Alert }) {
               </Badge>
             )}
             <span className="font-medium">{alert.title}</span>
+            {!resolved && alert.holds_sending ? <Badge tone="bad">Holds sending</Badge> : null}
+            {!resolved && alert.acknowledged ? <Badge>Reviewed by you</Badge> : null}
           </div>
           <div className="text-sm text-muted">{alert.subject}</div>
         </div>
@@ -77,6 +88,23 @@ function AlertCard({ alert }: { alert: Alert }) {
           {alert.advice}
         </p>
       ) : null}
+      {!resolved && alert.severity === "warning" && (alert.holds_sending || alert.acknowledged) ? (
+        <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted">
+          {alert.acknowledged ? (
+            <Button variant="secondary" onClick={() => acknowledge(true)}>
+              Hold sending again
+            </Button>
+          ) : (
+            <Button variant="secondary" onClick={() => acknowledge(false)}>
+              I&apos;ve reviewed this, allow sending
+            </Button>
+          )}
+          <span>
+            Warnings only. The inbox still sends at reduced capacity while it lasts, and it&apos;s held again if it gets
+            worse. Critical alerts can&apos;t be overridden.
+          </span>
+        </div>
+      ) : null}
     </Card>
   );
 }
@@ -85,15 +113,35 @@ export default function EmailHealthPage() {
   const [data, setData] = useState<Alerts | null>(null);
   const [checking, setChecking] = useState(false);
   const [permission, setPermission] = useState<string>("unsupported");
+  const [policy, setPolicy] = useState<"strict" | "balanced" | "">("");
 
   useEffect(() => {
     api<Alerts>("/api/health-alerts")
       .then(setData)
       .catch((e) => toast.error(e.message));
     api("/api/health-alerts/read", { method: "POST" }).catch(() => undefined);
+    api<{ health_policy?: "strict" | "balanced" }>("/api/settings")
+      .then((s) => setPolicy(s.health_policy || "strict"))
+      .catch(() => undefined);
     // eslint-disable-next-line react-hooks/set-state-in-effect
     if (typeof Notification !== "undefined") setPermission(Notification.permission);
   }, []);
+
+  function reload() {
+    api<Alerts>("/api/health-alerts")
+      .then(setData)
+      .catch((e) => toast.error(e.message));
+  }
+
+  async function savePolicy(next: "strict" | "balanced") {
+    try {
+      await api("/api/settings", { method: "PUT", body: JSON.stringify({ health_policy: next }) });
+      setPolicy(next);
+      toast.success(next === "strict" ? "Strict protection on" : "Balanced protection on");
+    } catch (e) {
+      toast.error((e as Error).message);
+    }
+  }
 
   async function checkNow() {
     setChecking(true);
@@ -154,7 +202,7 @@ export default function EmailHealthPage() {
             {critical ? ` · ${critical} need action now` : ""}
           </div>
           {open.map((a) => (
-            <AlertCard key={a.id} alert={a} />
+            <AlertCard key={a.id} alert={a} onChange={reload} />
           ))}
         </>
       ) : (
@@ -166,6 +214,40 @@ export default function EmailHealthPage() {
           </div>
         </Card>
       )}
+
+      <Card className="space-y-2">
+        <div className="font-medium">Account health protection</div>
+        <p className="text-sm text-muted">
+          Before every email the app checks, in order: the inbox&apos;s health, Gmail restrictions, today&apos;s safe
+          capacity, then your daily limit. If any check fails, nothing is sent from that inbox, even if it has emails left
+          today. Your daily limit is a maximum, not a target. Emails wait as &ldquo;Paused &mdash; Account Health
+          Protection&rdquo; and go out by themselves once an inbox passes every check. They move to another inbox
+          only if that one passes every check itself, and never to get round a Gmail restriction.
+        </p>
+        <div className="flex flex-wrap gap-4 text-sm">
+          <label className="flex items-start gap-2">
+            <input type="radio" className="mt-1" checked={policy === "strict"} onChange={() => savePolicy("strict")} />
+            <span>
+              <span className="font-medium">Strict (recommended)</span>
+              <span className="block text-xs text-muted">Hold sending on any credible warning sign.</span>
+            </span>
+          </label>
+          <label className="flex items-start gap-2">
+            <input type="radio" className="mt-1" checked={policy === "balanced"} onChange={() => savePolicy("balanced")} />
+            <span>
+              <span className="font-medium">Balanced</span>
+              <span className="block text-xs text-muted">
+                Hold only on serious signs; other warnings halve the inbox&apos;s capacity instead.
+              </span>
+            </span>
+          </label>
+        </div>
+        <p className="text-xs text-muted">
+          Whatever you choose, these always hold sending: Gmail blocking your emails, a blacklisted domain, 5% or more
+          bounces, missing SPF/DKIM, your emails landing in spam, Gmail limits, and a broken login. If the app can&apos;t
+          check an inbox&apos;s health, that inbox waits too.
+        </p>
+      </Card>
 
       <Card>
         <div className="mb-2 font-medium">How to read your inbox&apos;s numbers</div>

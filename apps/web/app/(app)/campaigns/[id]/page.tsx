@@ -188,8 +188,8 @@ export default function CampaignDetailPage() {
       </label>
       {campaign.paused_reason ? (
         <p className="text-sm text-danger">
-          {campaign.paused_reason === "no_eligible_inbox"
-            ? campaign.error_message || "Paused: no eligible inbox can send right now."
+          {campaign.paused_reason === "no_eligible_inbox" || campaign.paused_reason === "account_health_protection"
+            ? campaign.error_message || "Paused \u2014 Account Health Protection: no inbox is safe to send from right now."
             : campaign.paused_reason.replaceAll("_", " ")}
         </p>
       ) : null}

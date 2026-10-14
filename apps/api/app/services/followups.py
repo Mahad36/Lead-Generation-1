@@ -20,8 +20,9 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.logging_config import get_logger
 from app.models import Campaign, EmailAccount, EmailMessage, Lead, ScrapingJob, UserSettings, WebsiteAudit
-from app.services.deliverability import account_ready, in_send_window, sent_recently
-from app.services.gmail import GmailSendError, daily_limit_reached, send_gmail_message
+from app.services.deliverability import in_send_window, sent_recently
+from app.services.send_protection import HealthHold, evaluate, guard
+from app.services.gmail import GmailSendError, send_gmail_message
 from app.services.suppression import is_suppressed
 from app.services.gmail_signature import account_signature
 from app.utils.signature import append_signature
@@ -271,6 +272,8 @@ def send_followup(db: Session, root: EmailMessage, step: int, steps: int) -> Ema
     html, text = append_signature(_paragraphs_html(body), body, sig_html, sig_text)
     html += f'<p style="font-size:12px;color:#666">Not interested? <a href="{unsubscribe}">Unsubscribe</a></p>'
     text += f"\n\nUnsubscribe: {unsubscribe}"
+    # Re-checked immediately before sending, with the inbox locked until this email's record is committed
+    guard(db, account)  # HealthHold: not sent; it is due again next round
 
     message = EmailMessage(
         user_id=root.user_id,
@@ -381,12 +384,17 @@ def run_followups(db: Session) -> dict:
             waiting += 1
             continue
         account = db.get(EmailAccount, root.email_account_id)
-        if not account_ready(account) or daily_limit_reached(db, account) or sent_recently(db, account):
-            waiting += 1  # same inbox as the first email keeps the thread together: wait for it
+        # Account health protection first (health, Gmail restrictions, safe capacity, your limit). The follow-up
+        # stays on the first email's inbox (same thread), so while that inbox isn't safe it waits.
+        if not evaluate(db, account).ok or sent_recently(db, account):
+            waiting += 1
             continue
         try:
             send_followup(db, root, step, steps)
             sent += 1
+        except HealthHold as hold:
+            waiting += 1
+            logger.info("followup_held", root_id=root.id, stage=hold.verdict.stage, reason=hold.verdict.reason[:200])
         except GmailSendError as exc:
             logger.warning("followup_send_failed", root_id=root.id, step=step, error=str(exc)[:200])
         except Exception as exc:  # one bad thread must not stop the others

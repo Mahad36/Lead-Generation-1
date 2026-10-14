@@ -300,7 +300,7 @@ def resume_account(account_id: str, user: User = Depends(get_current_user), db: 
         .filter(
             Campaign.user_id == user.id,
             Campaign.status == "paused",
-            Campaign.paused_reason.in_(["inbox_paused_bounces", "no_eligible_inbox"]),
+            Campaign.paused_reason.in_(["inbox_paused_bounces", "no_eligible_inbox", "account_health_protection"]),
         )
         .all()
     )

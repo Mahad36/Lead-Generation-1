@@ -41,6 +41,9 @@ class UserSettings(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     free_offers: Mapped[str] = mapped_column(Text, default="", nullable=False)
     # Adds the open-tracking image to sent emails (on by default)
     track_opens: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    # Account health protection (services/send_protection.py): "strict" holds sending on any credible warning
+    # sign; "balanced" only on serious ones (warnings halve capacity instead)
+    health_policy: Mapped[str] = mapped_column(String(16), default="strict", server_default="strict", nullable=False)
     # Google Sheet of sites you built ("Anyone with the link"): one is referenced in every email by niche
     portfolio_sheet_url: Mapped[str] = mapped_column(Text, default="", nullable=False)
     contact_email: Mapped[str] = mapped_column(String(320), default="", nullable=False)

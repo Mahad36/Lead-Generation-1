@@ -26,6 +26,7 @@ class SettingsOut(BaseModel):
     company_description: str
     free_offers: str = ""
     track_opens: bool = True
+    health_policy: str = "strict"
     portfolio_sheet_url: str = ""
     contact_email: str
     contact_phone: str
@@ -81,6 +82,7 @@ class SettingsUpdate(BaseModel):
     company_description: str | None = None
     free_offers: str | None = None
     track_opens: bool | None = None
+    health_policy: Literal["strict", "balanced"] | None = None
     portfolio_sheet_url: str | None = None
     contact_email: str | None = None
     contact_phone: str | None = None

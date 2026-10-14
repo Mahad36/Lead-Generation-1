@@ -313,7 +313,7 @@ def save(db: Session, user_id: str, found: list[dict], checked: set[str], switch
             continue
         worse = alert.severity == "warning" and item["severity"] == "critical"
         if alert.resolved_at or worse:
-            alert.resolved_at = alert.notified_at = alert.read_at = None  # back (or worse): tell you again
+            alert.resolved_at = alert.notified_at = alert.read_at = alert.acknowledged_at = None  # back / worse: again
             alert.created_at = now
             opened += 1
         for field in ("kind", "severity", "subject", "title", "message", "advice", "email_account_id"):
@@ -358,6 +358,18 @@ def as_dict(alert: HealthAlert) -> dict:
         "resolved_at": alert.resolved_at.isoformat() if alert.resolved_at else None,
         "read": bool(alert.read_at),
         "notified": bool(alert.notified_at),
+        "acknowledged": bool(getattr(alert, "acknowledged_at", None)),
+        "holds_sending": holds_sending(alert),
     }
+
+
+def holds_sending(alert: HealthAlert) -> bool:
+    """Does this open alert hold sending under the strict policy (account health protection)?"""
+    from app.services.send_protection import HOLDS
+
+    if alert.resolved_at or (alert.severity == "warning" and getattr(alert, "acknowledged_at", None)):
+        return False
+    kind = alert.key.split(":", 1)[0] if alert.key.startswith("dns_") else alert.kind
+    return f"{kind}:{alert.severity}" in HOLDS["strict"]
 
 

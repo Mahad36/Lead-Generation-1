@@ -40,7 +40,7 @@ from app.services.deliverability import (
     WAITING_FOR_SPACING,
     WAITING_FOR_WINDOW,
 )
-from app.services.gmail import EmailAttachment, GmailSendError, daily_limit_reached, send_gmail_message
+from app.services.gmail import EmailAttachment, GmailSendError, send_gmail_message
 from app.services.integrations import resolve_ai_config
 from app.services.performance import PerformanceBlockedError, PerformanceError, measure_performance
 from app.services.portfolio import for_prompt as portfolio_for_prompt
@@ -76,7 +76,11 @@ STEP_LABELS = {
 ACTIVE_STATUSES = {"queued", *STEPS, "sending"}
 WAITING_FOR_LIMIT = "Waiting: daily send limit reached (sends automatically when allowed)"
 # Every reason an automatic send waits; auto_audits.send_waiting retries them all
-WAITING_STEPS = (WAITING_FOR_LIMIT, WAITING_FOR_WINDOW, WAITING_FOR_INBOX, WAITING_FOR_SPACING, WAITING_FOR_SCHEDULE)
+from app.services.send_protection import WAITING_FOR_HEALTH  # noqa: E402
+
+WAITING_STEPS = (
+    WAITING_FOR_LIMIT, WAITING_FOR_WINDOW, WAITING_FOR_INBOX, WAITING_FOR_SPACING, WAITING_FOR_SCHEDULE, WAITING_FOR_HEALTH,
+)
 SENDABLE_STATUSES = {"ready", "send_failed", "sent"}
 STALE_AFTER = timedelta(minutes=20)
 
@@ -1058,10 +1062,20 @@ def send_audit(
         allowed_ids=rotation["account_ids"] or None,
         mode=rotation["mode"],
     )
-    if daily_limit_reached(db, account):
-        raise deliverability.limit_reached_error(account)
-    if not manual:
-        deliverability.require_send_gap(db, account)  # avoid Gmail's "421 server busy" from back-to-back sends
+    # Account health protection, immediately before sending: health, Gmail restrictions, safe capacity, your limit
+    # (in that order), with the inbox locked until this email's record is committed below (atomic reservation).
+    from app.services import send_protection
+
+    try:
+        send_protection.guard(db, account, spacing=not manual)  # spacing avoids Gmail's "421 server busy"
+    except send_protection.HealthHold as hold:
+        if manual and hold.verdict.safety_block:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{send_protection.WAITING_FOR_HEALTH}: {hold.verdict.reason} Choose another inbox, or wait "
+                "until the warning clears (see Email health).",
+            ) from hold
+        raise send_protection.as_deferred(hold) from hold  # a full inbox: held until its limit resets, as before
 
     unsubscribe = unsubscribe_url(user_id, recipient)
     rfc_message_id = new_rfc_message_id(account.email_address)

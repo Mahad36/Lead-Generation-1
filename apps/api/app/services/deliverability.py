@@ -95,22 +95,45 @@ def account_ready(account: EmailAccount | None, now: datetime | None = None) -> 
 
 
 def pick_sending_account(
-    db: Session, user_id: str, allowed_ids: list[str] | None = None, mode: str = "auto"
+    db: Session, user_id: str, allowed_ids: list[str] | None = None, mode: str = "auto", exclude: set[str] | None = None
 ) -> EmailAccount | None:
-    """Inbox rotation: the eligible inbox with the most room today (account_health.rank_accounts).
+    """Inbox rotation: among the inboxes that are safe to send from (send_protection: health and provider checks),
+    the one with the most safe capacity left today (account_health.rank_accounts).
 
     allowed_ids limits it to the accounts chosen for a campaign; mode "health" prefers healthier accounts. When every
-    eligible inbox is full, one is returned anyway so the caller's daily-limit check holds the email for later.
-    None when no inbox is eligible at all (paused, restricted, reconnect needed).
+    safe inbox is full, one is returned anyway so the caller's capacity check holds the email for later (rotation
+    never moves emails to get round a limit). None when no inbox is safe to send from.
     """
     from app.services.account_health import rank_accounts
+    from app.services.send_protection import eligible_accounts
 
-    query = db.query(EmailAccount).filter(EmailAccount.user_id == user_id, EmailAccount.status == "connected")
-    accounts = [a for a in query if (not allowed_ids or a.id in allowed_ids) and account_ready(a)]
-    if not accounts:
+    safe = [(a, v) for a, v in eligible_accounts(db, user_id, allowed_ids, exclude) if not v.safety_block]
+    if not safe:
         return None
-    ranked = rank_accounts([(a, remaining_today(db, a)) for a in accounts], mode)
-    return ranked[0] if ranked else max(accounts, key=lambda a: a.is_default)
+    room = [(a, (v.as_dict()["remaining_safe"] if v.safe_capacity is not None else 10**6) if v.ok else 0) for a, v in safe]
+    ranked = rank_accounts(room, mode)
+    return ranked[0] if ranked else max((a for a, _ in safe), key=lambda a: a.is_default)
+
+
+def reassignment_target(
+    db: Session, account: EmailAccount, verdict, user_id: str, allowed_ids: list[str] | None = None, mode: str = "auto"
+) -> EmailAccount | None:
+    """Another inbox for an email whose inbox is held for its health: only one that independently passes every
+    check with safe capacity left. Never for a Gmail restriction (quota, backoff, suspension, pause) or a full day:
+    moving those emails elsewhere would be getting round Gmail, so they wait."""
+    from app.services.send_protection import evaluate
+
+    if verdict.stage != "health":
+        return None
+    alternative = pick_sending_account(db, user_id, allowed_ids, mode, exclude={account.id})
+    return alternative if alternative and evaluate(db, alternative).ok else None
+
+
+def held_reasons(db: Session, user_id: str, allowed_ids: list[str] | None = None) -> list[str]:
+    """Why each inbox that may be used is held by account health protection (empty: none is)."""
+    from app.services.send_protection import eligible_accounts
+
+    return [v.reason for _, v in eligible_accounts(db, user_id, allowed_ids) if v.safety_block]
 
 
 # ---------------------------------------------------------------- spacing between emails
@@ -455,28 +478,48 @@ def sending_account(
 ) -> EmailAccount:
     """The inbox that sends this email: the chosen one, or (none chosen) the rotation's pick among allowed_ids.
 
-    Automatic sends wait (SendDeferred) when no inbox they may use is eligible; a manual send says why it can't go.
+    Account health protection comes first: a chosen inbox that isn't safe to send from hands an automatic email to
+    another inbox only when that one is independently safe and has safe capacity left (logged as a reassignment);
+    otherwise the email is held (WAITING_FOR_HEALTH). A full inbox is never swapped for another (that would be
+    getting round a limit): its capacity hold comes from send_protection.guard(). A manual send says why it can't go.
     """
     from app.services.campaigns import resolve_email_account
+    from app.services.send_protection import WAITING_FOR_HEALTH, evaluate, record_reassignment
 
     if chosen_id:
         account = resolve_email_account(db, user_id, chosen_id)
-        if not account_ready(account):
-            message = f"{account.email_address} can't send right now: {account.paused_reason or account.health_reason}"
-            if automatic:
-                raise SendDeferred(message, WAITING_FOR_INBOX)
-            raise HTTPException(status_code=400, detail=f"{message} Check it in Email setup, or choose another inbox.")
-        return account
+        verdict = evaluate(db, account)
+        if not verdict.safety_block:
+            return account
+        if not automatic:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{WAITING_FOR_HEALTH}: {verdict.reason} Sending from this inbox is held to protect it; "
+                "choose another inbox in Email setup, or wait until the warning clears.",
+            )
+        alternative = reassignment_target(db, account, verdict, user_id, allowed_ids, mode)
+        if alternative:
+            record_reassignment(account, alternative, verdict.reason, "automatic email")
+            return alternative
+        raise SendDeferred(
+            f"{WAITING_FOR_HEALTH}: {verdict.reason} No other inbox is safe to send from with room left, so the "
+            "email waits.",
+            WAITING_FOR_HEALTH,
+        )
     account = pick_sending_account(db, user_id, allowed_ids, mode)
     if account:
         return account
     resolve_email_account(db, user_id, None)  # no connected inbox at all: "Connect Gmail first"
+    reasons = held_reasons(db, user_id, allowed_ids)
     message = (
-        "No eligible inbox can send right now (paused, restricted or needing reconnection). "
+        f"{WAITING_FOR_HEALTH}: no inbox is safe to send from right now ({' / '.join(reasons)}). "
+        "The emails wait and go out once an inbox passes every check; see Email health."
+        if reasons
+        else "No eligible inbox can send right now (paused, restricted or needing reconnection). "
         "The emails wait; see Email setup."
     )
     if automatic:
-        raise SendDeferred(message, WAITING_FOR_INBOX)
+        raise SendDeferred(message, WAITING_FOR_HEALTH if reasons else WAITING_FOR_INBOX)
     raise HTTPException(status_code=400, detail=message)
 
 

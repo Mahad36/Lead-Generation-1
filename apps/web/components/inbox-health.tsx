@@ -27,7 +27,90 @@ export type HealthSummary = {
   restricted_until: string | null;
   checked_at: string | null;
   unavailable: string[];
+  protection?: Protection;
 };
+
+/** Account health protection (apps/api/app/services/send_protection.py): may this inbox send right now? */
+export type Protection = {
+  eligible: boolean;
+  stage: "" | "health" | "provider" | "safe_capacity" | "user_limit";
+  reason: string;
+  user_limit: number;
+  safe_capacity: number | null;
+  sent_today: number;
+  in_flight: number;
+  remaining_configured: number | null;
+  remaining_safe: number | null;
+  policy: "strict" | "balanced";
+  blocked_since: string | null;
+  held: { audits: number; campaign_emails: number; total: number };
+  reassigned_today: number;
+  events: { action: string; at: string; details: Record<string, string> }[];
+};
+
+const STAGE_LABEL: Record<string, string> = {
+  health: "Paused \u2014 Account Health Protection",
+  provider: "Paused \u2014 Gmail restriction",
+  safe_capacity: "Safe capacity used for today",
+  user_limit: "Your daily limit reached",
+};
+const EVENT_LABEL: Record<string, string> = {
+  "sending.blocked": "Sending held",
+  "sending.allowed": "Sending allowed again",
+  "sending.reassigned": "Email moved to another inbox",
+};
+
+/** Can it send, and why not: health first, then Gmail restrictions, then safe capacity, then your limit. */
+function ProtectionPanel({ p }: { p: Protection }) {
+  const safety = p.stage === "health" || p.stage === "provider";
+  return (
+    <div className={`space-y-1 rounded-md p-2 text-xs ${safety ? "bg-red-50 dark:bg-red-950" : "bg-background"}`}>
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="font-medium">Eligible to send:</span>
+        {p.eligible ? <Badge tone="ok">Yes</Badge> : <Badge tone={safety ? "bad" : "warn"}>{STAGE_LABEL[p.stage] || "No"}</Badge>}
+        {p.blocked_since && safety ? <span className="text-muted">since {formatDate(p.blocked_since)}</span> : null}
+      </div>
+      {p.reason ? <p className={safety ? "text-red-700 dark:text-red-300" : "text-muted"}>{p.reason}</p> : null}
+      {safety ? (
+        <p className="text-muted">
+          Health comes before limits: nothing is sent from this inbox, even with capacity left. Emails wait (or go from
+          another inbox only if that one passes every check itself) and sending resumes by itself once this clears.
+        </p>
+      ) : null}
+      <div className="grid gap-x-6 gap-y-0.5 sm:grid-cols-2">
+        <div>
+          Your daily limit: <span className="font-medium">{p.user_limit || "none"}</span>
+          {p.remaining_configured !== null ? ` · ${p.remaining_configured} left` : ""}
+        </div>
+        <div>
+          Safe capacity today: <span className="font-medium">{p.safe_capacity ?? "no limit"}</span>
+          {p.remaining_safe !== null ? ` · ${p.remaining_safe} left` : ""}
+        </div>
+        <div>
+          Held by health protection: <span className="font-medium">{p.held.total}</span> email{p.held.total === 1 ? "" : "s"}
+          {p.held.total ? ` (${p.held.audits} audit, ${p.held.campaign_emails} campaign; all inboxes)` : ""}
+        </div>
+        <div>
+          Moved to another inbox today: <span className="font-medium">{p.reassigned_today}</span>
+        </div>
+      </div>
+      {p.events.length ? (
+        <details>
+          <summary className="cursor-pointer text-muted">Sending blocks and moves ({p.events.length})</summary>
+          <ul className="mt-1 space-y-0.5">
+            {p.events.map((e) => (
+              <li key={`${e.action}-${e.at}`}>
+                <span className="text-muted">{formatDate(e.at)}</span> · {EVENT_LABEL[e.action] || e.action}
+                {e.details.to ? ` to ${e.details.to}` : ""}
+                {e.details.reason ? `: ${e.details.reason}` : ""}
+              </li>
+            ))}
+          </ul>
+        </details>
+      ) : null}
+    </div>
+  );
+}
 
 export const HEALTH_TONE = { healthy: "ok", monitoring: "default", reduced: "warn", paused: "bad", reconnect: "bad" } as const;
 
@@ -335,6 +418,7 @@ function AccountHealth({ h, busy, onRecheck }: { h: HealthSummary; busy: string;
         </Button>
       </div>
       {h.reason ? <p className="text-xs text-muted">{h.reason}</p> : null}
+      {h.protection ? <ProtectionPanel p={h.protection} /> : null}
       <div className="grid gap-x-6 gap-y-1 text-xs sm:grid-cols-2">
         <div>
           Safe capacity today: <span className="font-medium">{h.recommended_today ?? h.limit_today}</span>

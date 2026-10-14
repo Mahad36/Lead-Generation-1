@@ -1,0 +1,418 @@
+"""Account health protection: health always overrides sending limits.
+
+Unit tests for the decision (order, policies, acknowledged warnings), and integration tests on a real, throwaway
+PostgreSQL (pgserver) for the sending pipeline itself: rotation, reassignment, holds, campaigns, follow-ups, and the
+atomic capacity reservation under concurrent workers. The integration tests are skipped if pgserver can't start.
+"""
+
+import tempfile
+import threading
+import time
+from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
+
+import pytest
+
+from app.services import send_protection
+from app.services.send_protection import HOLDS, Verdict, decide
+
+NOW = datetime(2026, 10, 15, 12, 0, tzinfo=UTC)
+
+
+def acct(**extra):
+    base = dict(id="a1", user_id="u1", email_address="me@gmail.com", status="connected", health_status="healthy",
+                health_reason="", paused_reason="", restricted_until=None, daily_limit=100)
+    return SimpleNamespace(**{**base, **extra})
+
+
+# ---------------------------------------------------------------- the decision (pure)
+
+
+def test_health_overrides_unused_capacity():
+    # Limit 100, 40 sent, 60 left: a credible warning sign still blocks the inbox
+    v = decide(acct(), holds=["Gmail blocked messages as against its policy"], assessed=True,
+               sent_today=40, in_flight=0, safe_capacity=100, now=NOW)
+    assert not v.ok and v.stage == "health" and v.safety_block
+    assert v.as_dict()["remaining_configured"] == 60  # shown on the dashboard, but not used
+
+
+def test_decision_order_health_provider_safe_capacity_user_limit():
+    paused = acct(paused_reason="Paused automatically: too many bounces")
+    # 1. health comes before everything
+    assert decide(paused, holds=["x"], assessed=True, sent_today=0, in_flight=0, safe_capacity=10, now=NOW).stage == "health"
+    # 2. provider restrictions
+    assert decide(paused, holds=[], assessed=True, sent_today=0, in_flight=0, safe_capacity=10, now=NOW).stage == "provider"
+    restricted = acct(restricted_until=NOW + timedelta(hours=2), health_reason="Gmail's daily quota was hit.")
+    assert decide(restricted, holds=[], assessed=True, sent_today=0, in_flight=0, safe_capacity=10, now=NOW).stage == "provider"
+    assert decide(acct(health_status="reconnect"), holds=[], assessed=True, sent_today=0, in_flight=0,
+                  safe_capacity=10, now=NOW).stage == "provider"
+    # 3. effective safe capacity (below your limit)
+    v = decide(acct(), holds=[], assessed=True, sent_today=17, in_flight=0, safe_capacity=17, now=NOW)
+    assert v.stage == "safe_capacity" and not v.safety_block
+    assert decide(acct(), holds=[], assessed=True, sent_today=0, in_flight=0, safe_capacity=0, now=NOW).stage == "safe_capacity"
+    # 4. your limit
+    assert decide(acct(daily_limit=30), holds=[], assessed=True, sent_today=30, in_flight=0, safe_capacity=30,
+                  now=NOW).stage == "user_limit"
+    # all clear
+    assert decide(acct(), holds=[], assessed=True, sent_today=5, in_flight=0, safe_capacity=30, now=NOW).ok
+
+
+def test_unassessable_health_holds_sending():
+    v = decide(acct(), holds=[], assessed=False, sent_today=0, in_flight=0, safe_capacity=100, now=NOW)
+    assert not v.ok and v.stage == "health"
+
+
+def test_emails_in_flight_count_against_capacity():
+    v = decide(acct(daily_limit=10), holds=[], assessed=True, sent_today=9, in_flight=1, safe_capacity=10, now=NOW)
+    assert not v.ok and v.stage == "user_limit"
+
+
+def test_policies():
+    assert "status:warning" in HOLDS["strict"] and "status:warning" not in HOLDS["balanced"]
+    assert "blacklist:critical" in HOLDS["balanced"]
+    for policy in HOLDS.values():  # weak or configuration-only signs never hold sending on their own
+        assert not {"volume:warning", "no_replies:warning", "dns_dmarc:warning"} & policy
+
+
+# ---------------------------------------------------------------- integration (real PostgreSQL)
+
+
+@pytest.fixture(scope="module")
+def pg():
+    try:
+        import pgserver
+        import sqlalchemy as sa
+        from sqlalchemy.orm import sessionmaker
+
+        from app.database import Base
+        import app.models  # noqa: F401
+
+        server = pgserver.get_server(tempfile.mkdtemp(prefix="sendprot_"), cleanup_mode="delete")
+        engine = sa.create_engine(server.get_uri().replace("postgresql://", "postgresql+psycopg://", 1))
+        Base.metadata.create_all(engine)
+    except Exception as exc:  # pragma: no cover - no embedded Postgres here
+        pytest.skip(f"embedded PostgreSQL unavailable: {exc}")
+    yield sessionmaker(bind=engine, expire_on_commit=False)
+    engine.dispose()
+
+
+@pytest.fixture
+def db(pg, monkeypatch):
+    from sqlalchemy import text
+
+    import app.database
+
+    session = pg()
+    for table in ("audit_logs", "health_alerts", "email_messages", "campaign_leads", "campaigns", "leads",
+                  "email_accounts", "user_settings", "users"):
+        session.execute(text(f"DELETE FROM {table}"))
+    session.commit()
+    monkeypatch.setattr(app.database, "get_session", pg)  # the audit trail's own sessions
+    yield session
+    session.close()
+
+
+def make_user(db, policy="strict"):
+    from app.models import User, UserSettings
+
+    user = User(email=f"u{time.time_ns()}@x.com", hashed_password="x")
+    db.add(user)
+    db.flush()
+    db.add(UserSettings(user_id=user.id, health_policy=policy))
+    db.commit()
+    return user
+
+
+def make_account(db, user, address, *, status="healthy", reason="", limit=100, **extra):
+    from app.models import EmailAccount
+
+    account = EmailAccount(user_id=user.id, email_address=address, status="connected", provider="smtp",
+                           daily_limit=limit, health_status=status, health_reason=reason,
+                           health_checked_at=datetime.now(UTC), health_signals={}, health={}, **extra)
+    db.add(account)
+    db.commit()
+    return account
+
+
+def sent(db, account, n, **extra):
+    from app.models import EmailMessage
+
+    now = datetime.now(UTC)
+    for i in range(n):
+        db.add(EmailMessage(user_id=account.user_id, email_account_id=account.id, recipient_email=f"r{i}@x.com",
+                            subject="s", status="sent", sent_at=now - timedelta(seconds=150 + i), **extra))
+    db.commit()
+
+
+def events(db, action):
+    from app.models import AuditLog
+
+    return db.query(AuditLog).filter(AuditLog.action == action).all()
+
+
+def test_unhealthy_account_with_capacity_is_not_used(db):
+    from app.services.deliverability import pick_sending_account
+
+    user = make_user(db)
+    risky = make_account(db, user, "risky@gmail.com", status="reduced",
+                         reason="Sending halved: bounce rate 4% of the last 50 emails.", limit=100, is_default=True)
+    sent(db, risky, 40)  # 60 left of its limit
+    v = send_protection.evaluate(db, risky)
+    assert v.stage == "health" and v.as_dict()["remaining_configured"] == 60
+    assert pick_sending_account(db, user.id) is None  # rotation never picks it
+
+
+def test_rotation_switches_to_an_independently_healthy_account(db):
+    from app.services.deliverability import sending_account
+
+    user = make_user(db)
+    risky = make_account(db, user, "risky@gmail.com", status="reduced", reason="Sending halved: bounces.")
+    good = make_account(db, user, "good@gmail.com")
+    chosen = sending_account(db, user.id, risky.id, automatic=True)
+    assert chosen.id == good.id
+    moved = events(db, "sending.reassigned")
+    assert moved and moved[0].details["to"] == "good@gmail.com" and moved[0].details["reason"]
+
+
+def test_alternative_must_pass_every_check_itself(db):
+    from app.models import HealthAlert
+    from app.services.deliverability import SendDeferred, sending_account
+
+    user = make_user(db)
+    risky = make_account(db, user, "risky@gmail.com", status="reduced", reason="Sending halved: bounces.")
+    full = make_account(db, user, "full@gmail.com", limit=5)
+    sent(db, full, 5)  # healthy but no capacity left
+    listed = make_account(db, user, "me@mydomain.com")
+    db.add(HealthAlert(user_id=user.id, key="blacklist:mydomain.com", kind="blacklist", severity="critical",
+                       subject="mydomain.com", title="mydomain.com is on a spam blacklist", last_seen_at=datetime.now(UTC)))
+    db.commit()
+    assert send_protection.evaluate(db, listed).stage == "health"  # its domain is blacklisted
+    with pytest.raises(SendDeferred) as held:
+        sending_account(db, user.id, risky.id, automatic=True)
+    assert held.value.step == send_protection.WAITING_FOR_HEALTH
+    assert not events(db, "sending.reassigned")
+
+
+def test_gmail_restrictions_are_never_moved_to_another_account(db):
+    from app.services.deliverability import SendDeferred, sending_account
+
+    user = make_user(db)
+    quota = make_account(db, user, "quota@gmail.com", restricted_until=datetime.now(UTC) + timedelta(hours=20),
+                         reason="Gmail says this account reached its daily sending limit (quota).")
+    make_account(db, user, "good@gmail.com")
+    with pytest.raises(SendDeferred) as held:
+        sending_account(db, user.id, quota.id, automatic=True)
+    assert held.value.step == send_protection.WAITING_FOR_HEALTH and "quota" in str(held.value.detail)
+
+
+def test_no_safe_account_holds_the_email(db):
+    from app.services.deliverability import SendDeferred, sending_account
+
+    user = make_user(db)
+    make_account(db, user, "a@gmail.com", status="reduced", reason="Sending halved: bounces.")
+    make_account(db, user, "b@gmail.com", paused_reason="Paused automatically: too many bounces.")
+    with pytest.raises(SendDeferred) as held:
+        sending_account(db, user.id, None, automatic=True)
+    assert held.value.step == send_protection.WAITING_FOR_HEALTH
+    assert held.value.step in __import__("app.services.website_audit", fromlist=["x"]).WAITING_STEPS  # retried
+
+
+def test_guard_blocks_and_records_it(db):
+    user = make_user(db)
+    risky = make_account(db, user, "risky@gmail.com", status="reduced", reason="Sending halved: bounces.")
+    with pytest.raises(send_protection.HealthHold) as held:
+        send_protection.guard(db, risky)
+    assert held.value.verdict.stage == "health"
+    blocked = events(db, "sending.blocked")
+    assert blocked and "bounces" in blocked[0].details["reason"]
+    db.refresh(risky)
+    assert risky.health["protection"]["blocked"] and risky.health["protection"]["since"]
+
+
+def test_acknowledged_warning_stops_holding_but_critical_never_does(db):
+    from app.models import HealthAlert
+
+    user = make_user(db)
+    account = make_account(db, user, "a@gmail.com", status="reduced", reason="Sending halved: bounces.")
+    assert send_protection.evaluate(db, account).stage == "health"
+    db.add(HealthAlert(user_id=user.id, email_account_id=account.id, key=f"status:{account.id}", kind="status",
+                       severity="warning", title="t", last_seen_at=datetime.now(UTC), acknowledged_at=datetime.now(UTC)))
+    db.commit()
+    assert send_protection.evaluate(db, account).ok
+    account.health_signals = {"rejected_7d": 2}  # Gmail refused messages: critical, can't be acknowledged
+    db.commit()
+    assert send_protection.evaluate(db, account).stage == "health"
+
+
+def test_balanced_policy_only_holds_on_serious_signs(db):
+    user = make_user(db, policy="balanced")
+    account = make_account(db, user, "a@gmail.com", status="reduced", reason="Sending halved: bounces.")
+    assert send_protection.evaluate(db, account).ok
+
+
+def test_capacity_reservation_is_atomic_under_concurrent_workers(db, pg):
+    from app.models import EmailAccount, EmailMessage
+
+    user = make_user(db)
+    account = make_account(db, user, "a@gmail.com", limit=5)
+    sent(db, account, 4)  # one slot left
+    results = []
+
+    def worker():
+        session = pg()
+        try:
+            row = session.get(EmailAccount, account.id)
+            send_protection.guard(session, row, spacing=False)
+            time.sleep(0.5)  # the other worker is waiting at the lock meanwhile
+            session.add(EmailMessage(user_id=user.id, email_account_id=row.id, recipient_email="x@x.com",
+                                     subject="s", status="sending"))
+            session.commit()
+            results.append("sent")
+        except send_protection.HealthHold as hold:
+            results.append(hold.verdict.stage)
+        finally:
+            session.close()
+
+    threads = [threading.Thread(target=worker) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+    assert sorted(results) == ["sent", "user_limit"]
+
+
+def test_spacing_counts_emails_still_being_sent(db):
+    from app.models import EmailMessage
+
+    user = make_user(db)
+    account = make_account(db, user, "a@gmail.com")
+    db.add(EmailMessage(user_id=user.id, email_account_id=account.id, recipient_email="x@x.com", subject="s",
+                        status="sending"))
+    db.commit()
+    with pytest.raises(send_protection.HealthHold) as held:
+        send_protection.guard(db, account)
+    assert held.value.verdict.stage == "spacing"
+
+
+# ---------------------------------------------------------------- campaigns and follow-ups
+
+
+def campaign_with_lead(db, user, account, rotate=False):
+    from app.models import Campaign, CampaignLead, Lead
+
+    lead = Lead(user_id=user.id, business_name="Acme Dental", primary_email="owner@acme-dental.com")
+    db.add(lead)
+    db.flush()
+    campaign = Campaign(user_id=user.id, name="Test", email_account_id=account.id, status="running",
+                        daily_limit=50, hourly_limit=50, extra={"rotate": rotate, "rotation": {"mode": "auto" if rotate else "single", "account_ids": []}})
+    db.add(campaign)
+    db.flush()
+    cl = CampaignLead(campaign_id=campaign.id, lead_id=lead.id, status="sending", subject="Hello",
+                      html_body="<p>Hi</p>", text_body="Hi")
+    db.add(cl)
+    db.commit()
+    return campaign, cl
+
+
+@pytest.fixture
+def no_network(monkeypatch):
+    from app.services import campaigns
+
+    sends = []
+    monkeypatch.setattr(campaigns, "address_problem", lambda *a, **k: "")
+    monkeypatch.setattr(campaigns, "account_signature", lambda account: ("", ""))
+    monkeypatch.setattr(campaigns, "send_gmail_message", lambda db, account, **k: sends.append(account.email_address) or "id")
+    return sends
+
+
+def test_campaign_holds_instead_of_sending(db, no_network):
+    from app.models import Campaign, CampaignLead
+    from app.services.campaigns import send_claimed_lead
+
+    user = make_user(db)
+    risky = make_account(db, user, "risky@gmail.com", status="reduced", reason="Sending halved: bounces.")
+    campaign, cl = campaign_with_lead(db, user, risky)
+    assert send_claimed_lead(db, cl) == "health_hold"
+    assert no_network == []
+    campaign, cl = db.get(Campaign, campaign.id), db.get(CampaignLead, cl.id)
+    db.refresh(campaign), db.refresh(cl)
+    assert campaign.status == "paused" and campaign.paused_reason == "account_health_protection"
+    assert "Account Health Protection" in campaign.error_message and cl.status == "queued"
+
+
+def test_campaign_moves_to_a_healthy_account_and_resumes_by_itself(db, no_network):
+    from app.models import Campaign
+    from app.services.campaigns import resume_health_held_campaigns, send_claimed_lead
+
+    user = make_user(db)
+    risky = make_account(db, user, "risky@gmail.com", status="reduced", reason="Sending halved: bounces.")
+    campaign, cl = campaign_with_lead(db, user, risky)
+    assert send_claimed_lead(db, cl) == "health_hold"
+    good = make_account(db, user, "good@gmail.com")  # a safe inbox becomes available
+
+    import app.services.scraping_jobs as jobs
+
+    queued = []
+    jobs.enqueue_task, original = (lambda task, *a: queued.append(a)), jobs.enqueue_task
+    try:
+        assert resume_health_held_campaigns(db) == 1
+    finally:
+        jobs.enqueue_task = original
+    db.refresh(campaign)
+    assert campaign.status == "running" and queued
+    from app.models import CampaignLead
+
+    cl = db.get(CampaignLead, cl.id)
+    cl.status = "sending"
+    db.commit()
+    assert send_claimed_lead(db, cl) == "sent"
+    assert no_network == [good.email_address]
+    assert events(db, "sending.reassigned")
+
+
+def test_followups_stay_on_their_inbox_and_wait(db, monkeypatch):
+    from app.models import EmailMessage
+    from app.services import followups
+
+    user = make_user(db)
+    risky = make_account(db, user, "risky@gmail.com", status="reduced", reason="Sending halved: bounces.")
+    make_account(db, user, "good@gmail.com")
+    root = EmailMessage(user_id=user.id, email_account_id=risky.id, recipient_email="x@x.com", subject="s",
+                        status="sent", sent_at=datetime.now(UTC) - timedelta(days=4))
+    db.add(root)
+    db.commit()
+    calls = []
+    monkeypatch.setattr(followups, "due_followups", lambda db: [(root, 1, 2)])
+    monkeypatch.setattr(followups, "_on_hold", lambda db, root: False)
+    monkeypatch.setattr(followups, "_send_time_ok", lambda db, root: True)
+    monkeypatch.setattr(followups, "send_followup", lambda *a: calls.append(a))
+    assert followups.run_followups(db) == {"sent": 0, "waiting": 1}
+    assert calls == []  # never sent from another inbox either (the thread stays together)
+
+
+def test_protection_round_records_recovery(db):
+    user = make_user(db)
+    account = make_account(db, user, "a@gmail.com", status="reduced", reason="Sending halved: bounces.")
+    send_protection.protection_round(db)
+    assert events(db, "sending.blocked")
+    account.health_status, account.health_reason = "healthy", ""
+    db.commit()
+    send_protection.protection_round(db)
+    assert events(db, "sending.allowed")
+
+
+def test_verdict_dict_for_the_dashboard():
+    v = Verdict(False, "health", "why", 100, 50, 40, 1)
+    d = v.as_dict()
+    assert d["remaining_configured"] == 59 and d["remaining_safe"] == 9 and d["eligible"] is False
+
+
+def test_rotating_campaign_skips_the_unhealthy_inbox(db, no_network):
+    from app.services.campaigns import send_claimed_lead
+
+    user = make_user(db)
+    risky = make_account(db, user, "risky@gmail.com", status="reduced", reason="Sending halved: bounces.", is_default=True)
+    good = make_account(db, user, "good@gmail.com")
+    campaign, cl = campaign_with_lead(db, user, risky, rotate=True)
+    assert send_claimed_lead(db, cl) == "sent"
+    assert no_network == [good.email_address]

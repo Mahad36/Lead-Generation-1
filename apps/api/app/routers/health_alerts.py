@@ -1,6 +1,6 @@
 from datetime import UTC, datetime, timedelta
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.deps import get_current_user
 from app.models import HealthAlert, User
+from app.services.audit import write_audit
 from app.services.health_alerts import as_dict, check_user
 
 router = APIRouter(prefix="/health-alerts", tags=["health-alerts"])
@@ -70,6 +71,35 @@ def mark_read(user: User = Depends(get_current_user), db: Session = Depends(get_
     )
     db.commit()
     return {"ok": True}
+
+
+@router.post("/{alert_id}/acknowledge")
+def acknowledge(alert_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """You reviewed a warning: it stops holding sending (the inbox still sends at reduced capacity while it lasts).
+    Critical alerts can't be acknowledged; they hold sending until the cause clears. Comes back if it gets worse."""
+    alert = db.query(HealthAlert).filter(HealthAlert.id == alert_id, HealthAlert.user_id == user.id).first()
+    if not alert:
+        raise HTTPException(status_code=404, detail="Alert not found")
+    if alert.severity == "critical":
+        raise HTTPException(
+            status_code=400,
+            detail="Critical warnings can't be overridden: sending stays held until the cause clears.",
+        )
+    alert.acknowledged_at = datetime.now(UTC)
+    write_audit(db, user_id=user.id, action="health_alert.acknowledged", entity_type="health_alert",
+                entity_id=alert.id, details={"key": alert.key, "title": alert.title})
+    db.commit()
+    return as_dict(alert)
+
+
+@router.post("/{alert_id}/unacknowledge")
+def unacknowledge(alert_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    alert = db.query(HealthAlert).filter(HealthAlert.id == alert_id, HealthAlert.user_id == user.id).first()
+    if not alert:
+        raise HTTPException(status_code=404, detail="Alert not found")
+    alert.acknowledged_at = None
+    db.commit()
+    return as_dict(alert)
 
 
 @router.post("/check")

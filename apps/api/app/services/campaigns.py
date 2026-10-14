@@ -27,9 +27,8 @@ from app.services.deliverability import (
     account_ready,
     address_problem,
     pick_sending_account,
-    sent_recently,
 )
-from app.services.gmail import GmailSendError, daily_limit_reached, send_gmail_message
+from app.services.gmail import GmailSendError, send_gmail_message
 from app.services.limits import LimitValidationError, validate_send_limits
 from app.services.suppression import is_suppressed
 from app.services.templates import build_template_context, text_context
@@ -465,6 +464,73 @@ def apply_daily_limit(db: Session, user_id: str, daily: int) -> None:
         account.daily_limit = daily
 
 
+def hold_campaign_lead(db: Session, campaign_id: str, campaign_lead_id: str, verdict) -> str:
+    """The email goes back in the queue (never sent, never failed). Why it waits decides how the campaign carries on:
+    spacing / a Gmail backoff: a little later; health protection: paused until an inbox is safe again (resumed by
+    resume_health_held_campaigns); a full day: paused until the daily limits reset."""
+    campaign = db.get(Campaign, campaign_id)
+    campaign_lead = db.get(CampaignLead, campaign_lead_id)
+    campaign_lead.status = "queued"
+    campaign_lead.locked_at = None
+    campaign_lead.locked_by = ""
+    now = datetime.now(UTC)
+    if verdict.stage == "spacing":
+        campaign.next_eligible_at = now + timedelta(seconds=MIN_SEND_GAP_SECONDS)
+        result = "spacing"
+    elif verdict.safety_block:
+        account = db.get(EmailAccount, campaign.email_account_id) if campaign.email_account_id else None
+        until = account.restricted_until if account else None
+        if verdict.stage == "provider" and until and until > now and account and not account.paused_reason:
+            campaign.next_eligible_at = until  # Gmail asked to slow down: carry on when the restriction clears
+            result = "restricted"
+        else:
+            campaign.status = "paused"
+            campaign.paused_reason = "account_health_protection"
+            campaign.error_message = (
+                f"Paused — Account Health Protection: {verdict.reason} The emails stay queued and the campaign "
+                "carries on by itself once an inbox it may use passes every check."
+            )
+            result = "health_hold"
+    else:
+        # The inbox's daily capacity covers every email it sends (audits, other campaigns), not just this one.
+        campaign.status = "paused"
+        campaign.paused_reason = "daily_limit_reached"
+        result = "daily_limit"
+    db.commit()
+    return result
+
+
+def resume_health_held_campaigns(db: Session) -> int:
+    """Campaigns held by account health protection carry on once an inbox they may use passes every check."""
+    from app.services.send_protection import evaluate
+
+    resumed = []
+    for campaign in db.query(Campaign).filter(
+        Campaign.status == "paused", Campaign.paused_reason.in_(["account_health_protection", "no_eligible_inbox"])
+    ):
+        if campaign_rotates(campaign):
+            rotation = campaign_rotation(campaign)
+            account = pick_sending_account(db, campaign.user_id, rotation["account_ids"] or None, rotation["mode"])
+        else:
+            account = db.get(EmailAccount, campaign.email_account_id) if campaign.email_account_id else None
+            if account and evaluate(db, account).safety_block:
+                from app.services.deliverability import reassignment_target
+
+                account = reassignment_target(db, account, evaluate(db, account), campaign.user_id)
+        if account and evaluate(db, account).ok:
+            campaign.status, campaign.paused_reason, campaign.error_message = "running", "", ""
+            resumed.append(campaign.id)
+    db.commit()
+    if resumed:
+        from app.services.scraping_jobs import enqueue_task
+        from workers.tasks.campaigns import process_campaign_queue
+
+        for campaign_id in resumed:
+            enqueue_task(process_campaign_queue, campaign_id)
+        logger.info("health_held_campaigns_resumed", count=len(resumed))
+    return len(resumed)
+
+
 def recover_stale_campaign_leads(db: Session, campaign_id: str) -> int:
     cutoff = datetime.now(UTC) - timedelta(seconds=90)
     sending = (
@@ -686,6 +752,15 @@ def send_claimed_lead(db: Session, campaign_lead: CampaignLead) -> str:
     if campaign and campaign_rotates(campaign):
         rotation = campaign_rotation(campaign)
         account = pick_sending_account(db, campaign.user_id, rotation["account_ids"] or None, rotation["mode"]) or account
+    elif campaign and account:
+        from app.services.deliverability import reassignment_target
+        from app.services.send_protection import evaluate, record_reassignment
+
+        verdict = evaluate(db, account)
+        alternative = reassignment_target(db, account, verdict, campaign.user_id) if verdict.safety_block else None
+        if alternative:
+            record_reassignment(account, alternative, verdict.reason, f"campaign {campaign.name}")
+            account = alternative
     if not campaign or not lead or not account:
         campaign_lead.status = "failed"
         campaign_lead.error_message = "Missing campaign, lead, or email account"
@@ -755,39 +830,6 @@ def send_claimed_lead(db: Session, campaign_lead: CampaignLead) -> str:
         campaign_lead.locked_at = None
         db.commit()
         return "failed"
-    if account.status != "connected":
-        campaign_lead.status = "failed"
-        campaign_lead.error_message = "Email account is not connected"
-        campaign_lead.locked_at = None
-        db.commit()
-        return "failed"
-    if not account_ready(account):
-        campaign_lead.status = "queued"
-        campaign_lead.locked_at = None
-        campaign_lead.locked_by = ""
-        until = account.restricted_until
-        if until and until > datetime.now(UTC) and not account.paused_reason and account.health_status != "reconnect":
-            # Gmail asked to slow down (backoff) or its daily quota was hit: carry on when the restriction clears
-            campaign.next_eligible_at = until
-            db.commit()
-            return "restricted"
-        # No eligible inbox (paused for bounces / reconnect needed): pause and say why on the campaign page
-        campaign.status = "paused"
-        campaign.paused_reason = "no_eligible_inbox"
-        campaign.error_message = (
-            f"{account.email_address} can't send ({account.health_reason or account.paused_reason}). "
-            "Resume or reconnect it in Email setup, or let the campaign rotate to another inbox."
-        )
-        db.commit()
-        return "inbox_paused"
-    if sent_recently(db, account):
-        # Another email just left this inbox (audit, follow-up, other campaign): wait a little
-        campaign.next_eligible_at = datetime.now(UTC) + timedelta(seconds=MIN_SEND_GAP_SECONDS)
-        campaign_lead.status = "queued"
-        campaign_lead.locked_at = None
-        campaign_lead.locked_by = ""
-        db.commit()
-        return "spacing"
     problem = address_problem(db, campaign.user_id, to)
     if problem:
         campaign_lead.status = "skipped"
@@ -796,15 +838,6 @@ def send_claimed_lead(db: Session, campaign_lead: CampaignLead) -> str:
         campaign_lead.locked_at = None
         db.commit()
         return "skipped"
-    if daily_limit_reached(db, account):
-        # The account's own daily limit covers every email it sends (audits, other campaigns), not just this one.
-        campaign.status = "paused"
-        campaign.paused_reason = "daily_limit_reached"
-        campaign_lead.status = "queued"
-        campaign_lead.locked_at = None
-        campaign_lead.locked_by = ""
-        db.commit()
-        return "daily_limit"
     if not (campaign_lead.subject or "").strip() or not (campaign_lead.html_body or "").strip():
         campaign_lead.status = "failed"
         campaign_lead.error_message = "Email content is missing"
@@ -836,6 +869,15 @@ def send_claimed_lead(db: Session, campaign_lead: CampaignLead) -> str:
             if text_body.strip() and sig_text:
                 text_body = f"{text_body.rstrip()}\n\n{sig_text}"
     tracked = tracks_opens(db, campaign.user_id)  # adds the open-tracking image; the visible email is the same
+
+    # Account health protection, immediately before sending: health, Gmail restrictions, safe capacity, your limit
+    # (in that order). The inbox stays locked until this email's record is committed below (atomic reservation).
+    from app.services.send_protection import HealthHold, guard
+
+    try:
+        guard(db, account)
+    except HealthHold as hold:
+        return hold_campaign_lead(db, campaign.id, campaign_lead.id, hold.verdict)
 
     message = EmailMessage(
         user_id=campaign.user_id,

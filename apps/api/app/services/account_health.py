@@ -43,6 +43,7 @@ BACKOFF_FIRST_MINUTES = 2
 BACKOFF_MAX_MINUTES = 60
 QUOTA_PAUSE = timedelta(hours=24)
 REJECTION_PAUSE = timedelta(hours=1)
+SIGNAL_WINDOW = timedelta(days=30)  # bounce and unsubscribe rates look at this period
 
 STATUS_RANK = {"healthy": 0, "monitoring": 1, "reduced": 2, "paused": 3, "reconnect": 4}
 STATUS_LABEL = {
@@ -167,7 +168,9 @@ def gather_signals(db: Session, account: EmailAccount) -> dict:
     now = datetime.now(UTC)
     base = db.query(EmailMessage).filter(EmailMessage.email_account_id == account.id, EmailMessage.is_test.is_(False))
     sent = base.filter(EmailMessage.sent_at.isnot(None))
-    recent = sent.order_by(EmailMessage.sent_at.desc()).limit(100).all()
+    # Rates over the last 30 days only: an inbox held by health protection sends nothing, so old bounces must be
+    # able to age out (otherwise a held inbox could never recover).
+    recent = sent.filter(EmailMessage.sent_at >= now - SIGNAL_WINDOW).order_by(EmailMessage.sent_at.desc()).limit(100).all()
     last50 = recent[:50]
     bounced = sum(1 for m in last50 if m.bounced_at)
     suppressed = {
@@ -365,6 +368,28 @@ def health_summary(db: Session, account: EmailAccount) -> dict:
         "restricted_until": account.restricted_until,
         "checked_at": account.health_checked_at,
         "unavailable": UNAVAILABLE,
+        "protection": protection_summary(db, account),
+    }
+
+
+def protection_summary(db: Session, account: EmailAccount) -> dict:
+    """Account health protection for the dashboard: may it send, why not, what's held, what moved, and when."""
+    from app.services import send_protection
+
+    try:
+        verdict = send_protection.evaluate(db, account, refresh=False)
+    except Exception as exc:
+        db.rollback()
+        logger.warning("protection_summary_failed", account_id=account.id, error=str(exc)[:200])
+        return {"eligible": False, "stage": "health", "reason": "Health couldn't be checked; sending is held."}
+    state = (account.health or {}).get("protection") or {}
+    return {
+        **verdict.as_dict(),
+        "policy": send_protection.policy_for(db, account.user_id),
+        "blocked_since": state.get("since") if state.get("blocked") else None,
+        "held": send_protection.held_counts(db, account.user_id),
+        "reassigned_today": send_protection.reassigned_today(db, account.id),
+        "events": send_protection.recent_events(db, account.id),
     }
 
 

@@ -107,6 +107,7 @@ export default function CampaignsPage() {
                 <Badge tone={tone(c.status)}>
                   {CAMPAIGN_STATUS[c.status] || c.status}
                   {c.status === "paused" && c.paused_reason === "daily_limit_reached" ? " (daily limit)" : ""}
+                  {c.status === "paused" && c.paused_reason === "account_health_protection" ? " \u2014 Account Health Protection" : ""}
                 </Badge>
                 {c.status === "running" || c.status === "scheduled" ? (
                   <Button variant="secondary" disabled={!!busy} onClick={() => act(c, "pause")}>
