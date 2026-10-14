@@ -27,6 +27,7 @@ export type FileOutreach = {
   email_account_id: string | null;
   email_account: string;
   email_account_issue: string;
+  audit_hold?: string; // audits paused: today's emails can't go out (saves Claude tokens)
 };
 
 export type OutreachMode = "auto" | "review" | "off";
@@ -212,6 +213,11 @@ export function FileOutreachControls({
         </select>
       </label>
       {o.email_account_issue ? <span className="w-full text-xs text-amber-700 dark:text-amber-300">{o.email_account_issue}</span> : null}
+      {o.audit_hold ? (
+        <span className="w-full rounded-md bg-amber-50 px-2 py-1 text-xs text-amber-800 dark:bg-amber-950 dark:text-amber-200">
+          Audits paused: {o.audit_hold}
+        </span>
+      ) : null}
       {o.status === "off" || o.status === "stopped" ? (
         <>
           <Button disabled={busy || !o.waiting_leads} onClick={() => send("start", { auto_send: true }, "Outreach started for this file")}>

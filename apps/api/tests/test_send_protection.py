@@ -566,3 +566,64 @@ def test_automatic_audits_are_not_pinned_to_the_default_inbox(db, monkeypatch):
     db.commit()
     audit = website_audit.start_audit(db, user.id, lead.id, auto_send=True, trigger="auto")
     assert audit.email_account_id is None  # rotation picks the inbox when the email is sent
+
+
+# ---------------------------------------------------------------- audits pause when today's emails can't go out
+
+
+def test_audit_budget_follows_sending_capacity(db):
+    from app.models import Lead, WebsiteAudit
+
+    user = make_user(db)
+    a = make_account(db, user, "a@gmail.com", limit=5)
+    b = make_account(db, user, "b@gmail.com", limit=5)
+    sent(db, a, 5)  # a is full; b has 5 left
+    assert send_protection.audit_budget(db, user.id)[0] == 5
+    lead = Lead(user_id=user.id, business_name="X", primary_email="x@x.com")
+    db.add(lead)
+    db.flush()
+    for status in ("ready", "ready", "analyzing"):  # audited / being audited, waiting for a slot
+        db.add(WebsiteAudit(user_id=user.id, lead_id=lead.id, website_url="https://x.com", auto_send=True, status=status))
+    db.commit()
+    assert send_protection.audit_budget(db, user.id)[0] == 2
+    sent(db, b, 3)
+    budget, reason = send_protection.audit_budget(db, user.id)
+    assert budget == 0 and "used up" in reason and "Claude tokens" in reason
+    assert send_protection.audit_budget(db, user.id, [a.id])[0] == 0  # a file that may only use the full inbox
+
+
+def test_no_audits_while_no_inbox_is_safe(db):
+    user = make_user(db)
+    make_account(db, user, "a@gmail.com", status="reduced", reason="Sending halved: bounces.")
+    budget, reason = send_protection.audit_budget(db, user.id)
+    assert budget == 0 and send_protection.WAITING_FOR_HEALTH in reason
+
+
+def test_file_audits_pause_when_sending_is_full_and_resume(db, monkeypatch):
+    from app.models import Lead, ScrapingJob
+    from app.services import auto_audits
+
+    started = []
+    monkeypatch.setattr(auto_audits, "outreach_issues", lambda *a, **k: [])
+    monkeypatch.setattr(auto_audits, "address_problem", lambda *a, **k: "")
+    monkeypatch.setattr(auto_audits, "start_audit", lambda db, user_id, lead_id, **k: started.append(lead_id))
+    user = make_user(db)
+    account = make_account(db, user, "a@gmail.com", limit=3)
+    job = ScrapingJob(user_id=user.id, name="f", status="completed", outreach_status="running",
+                      outreach_auto_send=True, extra={})
+    db.add(job)
+    db.flush()
+    for i in range(5):
+        db.add(Lead(user_id=user.id, business_name=f"B{i}", primary_email=f"b{i}@b{i}.com",
+                    website_url=f"https://b{i}.com", scraping_job_id=job.id, status="ready"))
+    db.commit()
+    sent(db, account, 3)  # today's limit already reached
+    assert auto_audits.poll_job(db, job) == 0 and started == []
+    db.refresh(job)
+    assert "used up" in job.extra["audit_hold"]
+    assert "used up" in auto_audits.job_outreach_status(db, job)["audit_hold"]
+    account.daily_limit = 5  # room again (e.g. the limits reset)
+    db.commit()
+    assert auto_audits.poll_job(db, job) == 2  # only as many as can still be sent today
+    db.refresh(job)
+    assert job.extra["audit_hold"] == ""

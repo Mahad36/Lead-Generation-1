@@ -435,6 +435,8 @@ def serialize_campaign(db: Session, campaign: Campaign) -> dict:
         "next_eligible_at": campaign.next_eligible_at,
         "paused_reason": campaign.paused_reason,
         "error_message": campaign.error_message,
+        # Audits paused because today's emails can't go out (limits reached / no safe inbox): saves Claude tokens
+        "audit_hold": (campaign.extra or {}).get("audit_hold", "") if campaign.status == "running" else "",
         "created_at": campaign.created_at,
         "lead_count": sum(counts.values()),
         "sent_count": counts.get("sent", 0),
@@ -1112,6 +1114,25 @@ def advance_audit_campaign(db: Session, campaign: Campaign) -> tuple[str, int | 
     )
     if running >= max(1, get_settings().auto_audit_batch_size):
         return "busy", 30
+    # An audit costs Claude tokens: none starts for an email that couldn't go out today (sending limits reached, or
+    # no inbox safe to send from). Carries on by itself once there's room again.
+    from app.services.send_protection import audit_budget
+
+    rotation = campaign_rotation(campaign)
+    allowed = (
+        rotation["account_ids"] or None if campaign_rotates(campaign)
+        else [campaign.email_account_id] if campaign.email_account_id else None
+    )
+    budget, hold = audit_budget(db, campaign.user_id, allowed)
+    extra = campaign.extra or {}
+    if extra.get("audit_hold", "") != (hold if budget <= 0 else ""):
+        from sqlalchemy.orm.attributes import flag_modified
+
+        campaign.extra = {**extra, "audit_hold": hold if budget <= 0 else ""}
+        flag_modified(campaign, "extra")
+        db.commit()
+    if budget <= 0:
+        return "sending_capacity_used", 15 * 60
 
     claimed = claim_next_campaign_lead(db, campaign.id, "audit-queue", ("pending", "approved", "queued"))
     if not claimed:

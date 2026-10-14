@@ -514,3 +514,52 @@ def reassigned_today(db: Session, account_id: str) -> int:
         .scalar()
         or 0
     )
+
+
+# ---------------------------------------------------------------- audit budget (Claude tokens)
+
+
+def audit_budget(db: Session, user_id: str, allowed_ids: list[str] | None = None) -> tuple[int, str]:
+    """How many more automatic audits are worth starting now, and why none when 0.
+
+    An audit costs Claude tokens, so it only starts when its email can go out today: the safe capacity the inboxes
+    may still send today (health protection and limits included), minus the audited emails already waiting for a
+    slot or being audited. When it's used up, audits wait and start again by themselves when the daily limits reset
+    (or an inbox becomes safe again)."""
+    from app.models import WebsiteAudit
+    from app.services.website_audit import ACTIVE_STATUSES
+
+    rows = eligible_accounts(db, user_id, allowed_ids)
+    if not rows:
+        return 0, "No connected inbox to send from, so no audits are started."
+    safe = [(a, v) for a, v in rows if not v.safety_block]
+    if not safe:
+        return 0, f"{WAITING_FOR_HEALTH}: no inbox is safe to send from, so no audits are started (saves Claude tokens)."
+    capacity = 0
+    for _, v in safe:
+        if not v.ok:
+            continue  # full for today
+        left = v.as_dict()["remaining_safe"]
+        if left is None:
+            return 10**6, ""  # an inbox without any limit
+        capacity += left
+    backlog = (
+        db.query(func.count(WebsiteAudit.id))
+        .filter(
+            WebsiteAudit.user_id == user_id,
+            WebsiteAudit.sent_at.is_(None),
+            WebsiteAudit.auto_send.is_(True),
+            # "sending" is already counted in the inboxes' capacity (in flight)
+            WebsiteAudit.status.in_([s for s in (*ACTIVE_STATUSES, "ready") if s != "sending"]),
+        )
+        .scalar()
+        or 0
+    )
+    budget = capacity - backlog
+    if budget > 0:
+        return budget, ""
+    return 0, (
+        f"Today's sending capacity is used up ({capacity} email{'s' if capacity != 1 else ''} left across your inboxes, "
+        f"{backlog} audited email{'s' if backlog != 1 else ''} already waiting). New audits pause to save Claude tokens "
+        "and start again by themselves when the daily limits reset."
+    )

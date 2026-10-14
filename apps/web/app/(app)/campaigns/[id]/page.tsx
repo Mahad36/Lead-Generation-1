@@ -186,6 +186,11 @@ export default function CampaignDetailPage() {
         </select>
         <span className="text-xs text-muted">Emails not sent yet switch to the account you pick.</span>
       </label>
+      {campaign.audit_hold ? (
+        <p className="rounded-md bg-amber-50 px-3 py-2 text-sm text-amber-800 dark:bg-amber-950 dark:text-amber-200">
+          Audits paused: {campaign.audit_hold}
+        </p>
+      ) : null}
       {campaign.paused_reason ? (
         <p className="text-sm text-danger">
           {campaign.paused_reason === "no_eligible_inbox" || campaign.paused_reason === "account_health_protection"

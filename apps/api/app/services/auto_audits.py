@@ -135,6 +135,8 @@ def job_outreach_status(db: Session, job: ScrapingJob) -> dict:
     account = db.get(EmailAccount, job.outreach_email_account_id) if job.outreach_email_account_id else None
     return {
         "status": job.outreach_status,
+        # Audits paused because today's emails can't go out (limits reached / no safe inbox): saves Claude tokens
+        "audit_hold": (job.extra or {}).get("audit_hold", "") if job.outreach_status == "running" else "",
         # Sends from this account; none chosen = your default account
         "email_account_id": account.id if account else None,
         "email_account": account.email_address if account else "",
@@ -340,6 +342,17 @@ def _running_audits(db: Session, user_id: str) -> int:
     return db.query(WebsiteAudit).filter(WebsiteAudit.user_id == user_id, WebsiteAudit.status.in_(ACTIVE_STATUSES)).count()
 
 
+def _note_hold(db: Session, job: ScrapingJob, reason: str) -> None:
+    """Why this file's audits are paused right now (shown on the file); cleared when they can run again."""
+    if (job.extra or {}).get("audit_hold", "") == reason:
+        return
+    from sqlalchemy.orm.attributes import flag_modified
+
+    job.extra = {**(job.extra or {}), "audit_hold": reason}
+    flag_modified(job, "extra")
+    db.commit()
+
+
 def poll_job(db: Session, job: ScrapingJob) -> int:
     """Start automatic audits for one file, within its own daily limit. Returns how many were started."""
     log = logger.bind(user_id=job.user_id, job_id=job.id)
@@ -350,12 +363,25 @@ def poll_job(db: Session, job: ScrapingJob) -> int:
     today = _today_start()
     used_today = _job_audits(db, job).filter(WebsiteAudit.created_at >= today, WebsiteAudit.status != "failed").count()
     batch = max(1, get_settings().auto_audit_batch_size)
-    # Audits are not tied to sending capacity: finished emails simply wait for an inbox with room.
-    # The real limits are the parallel audits (Claude + a browser each) and the optional daily audit limit (0 = none).
+    # Limits: the parallel audits (Claude + a browser each), the optional daily audit limit (0 = none), and the
+    # emails the file's inboxes can still send today: an audit costs Claude tokens, so none starts for an email that
+    # couldn't go out today (sending limit reached, or no inbox safe to send from). They resume by themselves.
     room = batch - _running_audits(db, job.user_id)
     if job.outreach_daily_limit:
         room = min(room, job.outreach_daily_limit - used_today)
+    from app.services.send_protection import audit_budget
+
+    rotation = (job.extra or {}).get("rotation") or {}
+    allowed = (
+        [job.outreach_email_account_id] if job.outreach_email_account_id
+        else rotation.get("account_ids") if rotation.get("mode") == "selected" else None
+    )
+    budget, hold = audit_budget(db, job.user_id, allowed or None)
+    _note_hold(db, job, hold)
+    room = min(room, budget)
     if room <= 0:
+        if hold:
+            log.info("file_audits_held", reason=hold[:160])
         return 0
     started = 0
     for lead in candidate_leads_query(db, job.user_id, job.id).limit(room).all():
