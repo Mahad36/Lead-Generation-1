@@ -211,10 +211,53 @@ export default function ScrapingPage() {
     await refresh(job.id);
   }
 
-  async function action(kind: "pause" | "resume" | "cancel") {
-    if (!job) return;
-    const updated = await api<Job>(`/api/scraping/jobs/${job.id}/${kind}`, { method: "POST" });
-    setJob(updated);
+  /** Pause / resume / cancel one scrape that is already running (from its own card, never from the form). */
+  async function scrapeAction(target: Job, kind: "pause" | "resume" | "cancel") {
+    if (kind === "cancel" && !window.confirm(`Cancel scraping "${target.name}"? Leads found so far are kept.`)) return;
+    try {
+      const updated = await api<Job>(`/api/scraping/jobs/${target.id}/${kind}`, { method: "POST" });
+      if (job?.id === updated.id) setJob(updated);
+      setJobs((rows) => rows.map((row) => (row.id === updated.id ? { ...row, ...updated } : row)));
+      toast.success(kind === "cancel" ? "Scraping cancelled" : kind === "pause" ? "Scraping paused" : "Scraping resumed");
+    } catch (e) {
+      toast.error((e as Error).message);
+    }
+  }
+
+  /** Start over with an empty form; nothing that is already running is touched. */
+  function clearForm() {
+    setJobName("");
+    setLocationState({ country: "United States", area: "" });
+    setAreas([]);
+    setTypes([]);
+    setTypeDraft("");
+    setOutreachMode("auto");
+    setOutreachLimit(0);
+    setOutreachAccount("");
+    setFollowups(true);
+    setSchedule(DEFAULT_SCHEDULE);
+    setRecipients(DEFAULT_RECIPIENTS);
+  }
+
+  function scrapeControls(target: Job) {
+    const active = ["queued", "running", "paused"].includes(target.status);
+    if (!active) return null;
+    return (
+      <span className="flex flex-wrap gap-2">
+        {target.status === "paused" ? (
+          <Button variant="secondary" onClick={() => scrapeAction(target, "resume")}>
+            Resume scraping
+          </Button>
+        ) : (
+          <Button variant="secondary" onClick={() => scrapeAction(target, "pause")}>
+            Pause scraping
+          </Button>
+        )}
+        <Button variant="danger" onClick={() => scrapeAction(target, "cancel")}>
+          Cancel scraping
+        </Button>
+      </span>
+    );
   }
 
   return (
@@ -318,9 +361,12 @@ export default function ScrapingPage() {
         ) : null}
         <div className="flex flex-wrap gap-2">
           <Button onClick={() => start().catch((e) => toast.error(e.message))}>Start scraping</Button>
-          <Button variant="secondary" disabled={!job} onClick={() => action("pause")}>Pause</Button>
-          <Button variant="secondary" disabled={!job} onClick={() => action("resume")}>Resume</Button>
-          <Button variant="danger" disabled={!job} onClick={() => action("cancel")}>Cancel</Button>
+          <Button variant="secondary" onClick={clearForm}>
+            Clear form
+          </Button>
+          <span className="self-center text-xs text-muted">
+            This form only sets up a new scrape. Pause or cancel a running one on its own card below.
+          </span>
         </div>
       </Card>
       {job ? (
@@ -339,6 +385,7 @@ export default function ScrapingPage() {
               </div>
             </div>
             <div className="flex flex-wrap items-center gap-2">
+              {scrapeControls(job)}
               <Badge tone={statusTone(job.status)}>{job.status}</Badge>
               {job.finding_emails ? (
                 <Badge tone="warn">Finding emails…</Badge>
@@ -416,6 +463,7 @@ export default function ScrapingPage() {
                 <FileOutreachControls jobId={j.id} outreach={j.outreach} onChange={() => refresh(job?.id).catch(() => undefined)} />
               </div>
               <div className="flex flex-wrap items-center gap-2">
+                {scrapeControls(j)}
                 <Badge tone={statusTone(j.status)}>{j.status}</Badge>
                 <Button variant="secondary" onClick={() => { setJob(j); loadLeads(j.id).catch(() => setLeads([])); }}>
                   Show leads
