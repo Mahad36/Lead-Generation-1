@@ -29,7 +29,6 @@ class SettingsOut(BaseModel):
     portfolio_sheet_url: str = ""
     contact_email: str
     contact_phone: str
-    default_signature: str
     target_industries: str = ""
     scrape_max_results: int
     crawl_max_pages: int
@@ -85,7 +84,6 @@ class SettingsUpdate(BaseModel):
     portfolio_sheet_url: str | None = None
     contact_email: str | None = None
     contact_phone: str | None = None
-    default_signature: str | None = None
     target_industries: str | None = None
     scrape_max_results: int | None = Field(default=None, ge=1)
     crawl_max_pages: int | None = Field(default=None, ge=1, le=20)

@@ -3,7 +3,6 @@ from sqlalchemy.orm import Session
 
 from app.models import EmailTemplate, Lead, UserSettings, WebsiteAnalysis
 from app.schemas.templates import TemplateCreate, TemplateUpdate
-from app.utils.signature import signature_html, signature_text
 from app.utils.templates import render_template, validate_template_variables
 
 
@@ -101,9 +100,8 @@ def delete_template(db: Session, user_id: str, template_id: str) -> None:
 
 
 def text_context(context: dict, db: Session, user_id: str) -> dict:
-    """The same values for a plain-text body: the signature as text lines, not HTML."""
-    settings = db.query(UserSettings).filter(UserSettings.user_id == user_id).first()
-    return {**context, "signature": signature_text(settings.default_signature if settings else "")}
+    """The same values for a plain-text body."""
+    return dict(context)
 
 
 def build_template_context(db: Session, user_id: str, lead: Lead | None) -> dict:
@@ -137,7 +135,8 @@ def build_template_context(db: Session, user_id: str, lead: Lead | None) -> dict
         "sender_name": settings.sender_name if settings else "",
         "sender_company": settings.company_name if settings else "",
         "sender_website": settings.company_website if settings else "",
-        "signature": signature_html(settings.default_signature if settings else ""),  # plain text in text bodies
+        # The sending Gmail's own signature is added when the email is sent; {{signature}} in old templates is empty
+        "signature": "",
         "unsubscribe_url": "{{unsubscribe_url}}",
     }
 

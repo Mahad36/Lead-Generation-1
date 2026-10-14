@@ -19,6 +19,7 @@ from app.logging_config import get_logger
 from app.models import ConversationMessage, EmailAccount, EmailMessage, Lead, UserSettings
 from app.services.gmail import GmailSendError, daily_limit_reached, send_gmail_message
 from app.services.tracking import new_rfc_message_id, open_pixel_html, tracking_summary, tracks_opens
+from app.services.gmail_signature import account_signature
 from app.utils.signature import append_signature
 
 logger = get_logger("conversations")
@@ -294,9 +295,9 @@ def send_reply(db: Session, user_id: str, root_id: str, body: str) -> dict:
             + "</blockquote>"
         )
     html_reply = "".join(f"<p>{escape(p).replace(chr(10), '<br>')}</p>" for p in body.split("\n\n") if p.strip())
-    # Your signature goes under your answer and above their quoted message, as in Gmail.
-    settings = db.query(UserSettings).filter(UserSettings.user_id == user_id).first()
-    html_reply, signed_text = append_signature(html_reply, body, settings.default_signature if settings else "")
+    # This Gmail's own signature goes under your answer and above their quoted message, as in Gmail.
+    sig_html, sig_text = account_signature(account)
+    html_reply, signed_text = append_signature(html_reply, body, sig_html, sig_text)
 
     message = EmailMessage(
         user_id=user_id,

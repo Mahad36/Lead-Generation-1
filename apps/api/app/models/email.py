@@ -47,6 +47,13 @@ class EmailAccount(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     warmup_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     # Last spam-placement test and domain (SPF / DKIM / DMARC) check
     health: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
+    # This Gmail's own signature, read from the latest email written in Gmail (services/gmail_signature.py).
+    # SMTP / API sends never get Gmail's signature automatically, so the app adds this one.
+    gmail_signature_html: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    gmail_signature_text: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    gmail_signature_from: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    gmail_signature_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    gmail_signature_error: Mapped[str] = mapped_column(Text, default="", nullable=False)
 
     user = relationship("User")
 

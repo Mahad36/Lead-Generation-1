@@ -50,6 +50,7 @@ def list_accounts(user: User = Depends(get_current_user), db: Session = Depends(
         .all()
     )
     from app.services.deliverability import effective_daily_limit
+    from app.services.gmail_signature import signature_info
     from app.services.warmup import warmup_stats
 
     out = []
@@ -76,6 +77,7 @@ def list_accounts(user: User = Depends(get_current_user), db: Session = Depends(
                 "warmup_enabled": account.warmup_enabled,
                 "warmup": warmup_stats(db, account) if _smtp_payload(account) else None,
                 "health": account.health or {},
+                "gmail_signature": signature_info(account),
                 "last_successful_send_at": account.last_successful_send_at,
                 "last_error": account.last_error,
                 "provider": account.provider,
@@ -104,6 +106,9 @@ def connect_smtp(payload: SmtpConnectIn, user: User = Depends(get_current_user),
         )
     except GmailSendError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    from app.services.gmail_signature import refresh_in_background
+
+    refresh_in_background(account.id)  # read this Gmail's own signature from its Sent folder
     return {"id": account.id, "email_address": account.email_address, "status": account.status, "provider": "smtp"}
 
 
@@ -267,6 +272,14 @@ def set_warmup(account_id: str, payload: WarmupIn, user: User = Depends(get_curr
     account.warmup_enabled = payload.enabled
     db.commit()
     return {"warmup_enabled": account.warmup_enabled}
+
+
+@router.post("/{account_id}/signature/refresh")
+def refresh_gmail_signature(account_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Read this Gmail's current signature again (from the latest email written in Gmail)."""
+    from app.services.gmail_signature import refresh_signature
+
+    return refresh_signature(db, _own_account(db, user, account_id))
 
 
 @router.post("/{account_id}/domain-check")

@@ -1,6 +1,6 @@
 "use client";
 
-import { SendFrom } from "@/components/send-from";
+import { GmailSignatureStatus, SendFrom } from "@/components/send-from";
 import { Badge, Button, Card, Input, Label, Textarea } from "@/components/ui";
 import { api } from "@/lib/api";
 import { SAMPLE_LEADS_CSV } from "@/lib/constants";
@@ -47,10 +47,9 @@ function NewCampaignForm() {
   const [outreachMode, setOutreachMode] = useState<"audit" | "template">("audit");
   // Audit campaigns: send each email as soon as its audit is ready, or keep it for review first.
   const [autoSend, setAutoSend] = useState(true);
-  // Put the signature from Settings under each email of this campaign.
+  // Put the sending Gmail's own signature (read from Gmail) under each email of this campaign.
   const [addSignature, setAddSignature] = useState(true);
   const [followups, setFollowups] = useState(true);
-  const [signature, setSignature] = useState<string | null>(null);
   const [scheduledAt, setScheduledAt] = useState("");
   const [saving, setSaving] = useState(false);
   const [uploading, setUploading] = useState(false);
@@ -96,12 +95,6 @@ function NewCampaignForm() {
       toast.error(e.message);
     });
   }, [queryImport, queryScrape, queryManual]);
-
-  useEffect(() => {
-    api<{ default_signature?: string }>("/api/settings")
-      .then((s) => setSignature(s.default_signature || ""))
-      .catch(() => setSignature(null));
-  }, []);
 
   useEffect(() => {
     if (selected) setName((cur) => (cur === "Outreach campaign" || cur.startsWith("Campaign · ") ? `Campaign · ${selected.name}` : cur));
@@ -370,14 +363,12 @@ function NewCampaignForm() {
             <label className="flex cursor-pointer items-start gap-2 text-sm">
               <input type="checkbox" className="mt-1" checked={addSignature} onChange={(e) => setAddSignature(e.target.checked)} />
               <span>
-                <span className="font-medium">Add my signature</span>
+                <span className="font-medium">Add my Gmail signature</span>
                 <span className="block text-xs text-muted">
-                  {signature === null
-                    ? "Adds the signature from AI & settings under each email."
-                    : signature.trim()
-                      ? `Adds your signature under each email, replacing a closing name/company line: ${signature.trim().split("\n").filter(Boolean).join(" · ")}`
-                      : "You haven't set a signature yet. Add one in AI & settings → Email signature."}
+                  Each email gets the signature you set in the sending Gmail itself (read from Gmail, never another
+                  account&apos;s).
                 </span>
+                <GmailSignatureStatus accountId={accountId} />
               </span>
             </label>
             <label className="mt-3 flex cursor-pointer items-start gap-2 text-sm">

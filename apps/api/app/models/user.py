@@ -45,7 +45,6 @@ class UserSettings(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     portfolio_sheet_url: Mapped[str] = mapped_column(Text, default="", nullable=False)
     contact_email: Mapped[str] = mapped_column(String(320), default="", nullable=False)
     contact_phone: Mapped[str] = mapped_column(String(64), default="", nullable=False)
-    default_signature: Mapped[str] = mapped_column(Text, default="", nullable=False)
     # Deliverability (all on by default): follow-ups, sending hours, address checks, warm-up
     followups_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     followup_days: Mapped[str] = mapped_column(String(64), default="3,5", nullable=False)  # days after the previous email

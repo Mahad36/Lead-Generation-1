@@ -1,7 +1,7 @@
-"""The email signature from Settings (plain text, one line per row), added under every email you send.
+"""Signature placement for outgoing emails.
 
-Kept as plain text in the email (no images or tables) so it looks like a person's Gmail signature and doesn't push
-cold emails towards the Promotions tab. Web addresses and email addresses become links.
+The signature itself comes from each Gmail account (services/gmail_signature.py); nothing is written or stored in
+the app. These helpers only put that account's signature in the right place and avoid a doubled name.
 """
 
 from __future__ import annotations
@@ -9,55 +9,27 @@ from __future__ import annotations
 import re
 from html import escape
 
-LINK_RE = re.compile(
-    r"(?P<email>[\w.+-]+@[\w-]+(?:\.[\w-]+)+)"
-    r"|(?P<url>(?:https?://|www\.)[^\s<>\"']+|\b[\w-]+(?:\.[\w-]+)*\.(?:com|net|org|io|co|agency|studio|design|dev|"
-    r"uk|pk|de|ca|au|us|ae|in|me|app|site|online|store|shop)(?:/[^\s<>\"']*)?\b)",
-    re.I,
-)
+CLOSINGS = r"(best|thanks|cheers|regards|kind regards|best regards|thank you|talk soon|speak soon)[,!.]?"
 
 
-def signature_lines(signature: str | None) -> list[str]:
-    lines = [line.rstrip() for line in (signature or "").strip().splitlines()]
-    while lines and lines[0].strip() in ("--", "-- "):
-        lines.pop(0)  # the app adds the spacing; a typed "--" delimiter is not needed
-    return lines
-
-
-def _linked(line: str) -> str:
-    out, last = [], 0
-    for match in LINK_RE.finditer(line):
-        out.append(escape(line[last : match.start()]))
-        text = match.group(0).rstrip(".,;:)")
-        tail = match.group(0)[len(text) :]
-        if match.group("email"):
-            href = f"mailto:{text}"
-        else:
-            href = text if text.lower().startswith("http") else f"https://{text}"
-        out.append(f'<a href="{escape(href, quote=True)}">{escape(text)}</a>{escape(tail)}')
-        last = match.end()
-    out.append(escape(line[last:]))
-    return "".join(out)
-
-
-def signature_html(signature: str | None) -> str:
-    lines = signature_lines(signature)
-    if not lines:
-        return ""
-    return "<p>" + "<br>".join(_linked(line) for line in lines) + "</p>"
-
-
-def signature_text(signature: str | None) -> str:
-    return "\n".join(signature_lines(signature))
-
-
-def append_signature(html_body: str, text_body: str, signature: str | None) -> tuple[str, str]:
-    """The email with the signature under it (unchanged when no signature is set)."""
-    html = signature_html(signature)
-    if not html:
+def append_signature(html_body: str, text_body: str, sig_html: str, sig_text: str) -> tuple[str, str]:
+    """The email with the account's signature under it (unchanged when the account has none)."""
+    if not sig_html:
         return html_body, text_body
-    text = signature_text(signature)
-    return f"{html_body}{html}", (f"{text_body.rstrip()}\n\n{text}" if text_body.strip() else text)
+    if text_body.strip() and sig_text:
+        text = f"{text_body.rstrip()}\n\n{sig_text}"
+    else:
+        text = text_body or sig_text
+    return f"{html_body}{sig_html}", text
+
+
+def ensure_sign_off(body_html: str, sender_name: str, company_name: str) -> str:
+    """No signature to add: make sure a bare closing ("Best,") is followed by the sender's name and company."""
+    names = "<br>".join(escape(n.strip()) for n in (sender_name, company_name) if n and n.strip())
+    match = re.search(r"<p\b[^>]*>\s*([A-Za-z ,!.]{2,30})\s*</p>\s*$", body_html or "")
+    if not names or not match or not re.fullmatch(CLOSINGS, match.group(1).strip(), re.I):
+        return body_html
+    return f"{body_html[: match.end(1)]}<br>{names}{body_html[match.end(1):]}"
 
 
 def insert_signature(html_body: str, signature: str, sender_name: str, company_name: str) -> str:

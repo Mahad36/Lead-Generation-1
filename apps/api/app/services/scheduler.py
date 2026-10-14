@@ -63,10 +63,11 @@ def deliverability_round() -> dict:
     """Follow-ups that are due, then warm-up between your inboxes. Each part survives the other failing."""
     from app.database import get_session
     from app.services.followups import run_followups
+    from app.services.gmail_signature import refresh_due
     from app.services.warmup import run_warmup
 
     result = {}
-    for name, job in (("followups", run_followups), ("warmup", run_warmup)):
+    for name, job in (("signatures", refresh_due), ("followups", run_followups), ("warmup", run_warmup)):
         db = get_session()
         try:
             result[name] = job(db)

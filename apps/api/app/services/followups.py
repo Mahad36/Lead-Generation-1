@@ -23,6 +23,7 @@ from app.models import Campaign, EmailAccount, EmailMessage, Lead, ScrapingJob, 
 from app.services.deliverability import account_ready, in_send_window, sent_recently
 from app.services.gmail import GmailSendError, daily_limit_reached, send_gmail_message
 from app.services.suppression import is_suppressed
+from app.services.gmail_signature import account_signature
 from app.utils.signature import append_signature
 
 logger = get_logger("followups")
@@ -221,8 +222,9 @@ def send_followup(db: Session, root: EmailMessage, step: int, steps: int) -> Ema
     settings = _settings(db, root.user_id)
     account = db.get(EmailAccount, root.email_account_id)
     lead = db.get(Lead, root.lead_id) if root.lead_id else None
-    signature = (settings.default_signature if settings else "") if _adds_signature(db, root) else ""
-    body = _write_body(db, root, step, steps, lead, settings, bool(signature.strip()))
+    # The first email's Gmail account sends the follow-up, with that account's own Gmail signature
+    sig_html, sig_text = account_signature(account) if _adds_signature(db, root) else ("", "")
+    body = _write_body(db, root, step, steps, lead, settings, bool(sig_html))
 
     thread = _thread(db, root)
     chain = [m.rfc_message_id for m in thread if m.rfc_message_id]
@@ -233,7 +235,7 @@ def send_followup(db: Session, root: EmailMessage, step: int, steps: int) -> Ema
         headers["In-Reply-To"] = chain[-1]
         headers["References"] = " ".join(chain[-20:])
     unsubscribe = unsubscribe_url(root.user_id, root.recipient_email)
-    html, text = append_signature(_paragraphs_html(body), body, signature)
+    html, text = append_signature(_paragraphs_html(body), body, sig_html, sig_text)
     html += f'<p style="font-size:12px;color:#666">Not interested? <a href="{unsubscribe}">Unsubscribe</a></p>'
     text += f"\n\nUnsubscribe: {unsubscribe}"
 

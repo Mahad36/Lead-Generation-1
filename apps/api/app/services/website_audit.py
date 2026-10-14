@@ -44,7 +44,8 @@ from app.services.screenshots import ScreenshotError, capture_screenshots
 from app.services.platform_detection import detect_platform
 from app.services.suppression import is_suppressed
 from app.utils.normalize import normalize_email, normalize_url
-from app.utils.signature import append_signature, drop_ai_sign_off, signature_html
+from app.services.gmail_signature import account_signature
+from app.utils.signature import append_signature, drop_ai_sign_off, ensure_sign_off
 
 logger = get_logger("website_audit")
 
@@ -171,18 +172,31 @@ def free_offers(settings: UserSettings | None) -> list[str]:
     return [line for line in lines if line] or DEFAULT_FREE_OFFERS
 
 
-def _audit_signature(db: Session, audit: WebsiteAudit | None, settings: UserSettings | None) -> str:
-    """The signature for this audit's email: the one from Settings, unless its campaign switched it off."""
-    signature = settings.default_signature if settings else ""
-    if not signature or audit is None:
-        return signature
+def _adds_signature(db: Session, audit: WebsiteAudit | None) -> bool:
+    """The Gmail signature goes under this audit's email unless its campaign switched "Add my signature" off."""
+    if audit is None:
+        return True
     try:
         from app.services.campaigns import campaign_adds_signature
 
-        return signature if campaign_adds_signature(db, audit) else ""
+        return campaign_adds_signature(db, audit)
     except Exception as exc:  # bookkeeping must never block an audit
         logger.warning("campaign_signature_check_failed", audit_id=audit.id, error=str(exc))
-        return signature
+        return True
+
+
+def _signature_expected(db: Session, user_id: str, audit: WebsiteAudit | None) -> bool:
+    """When drafting: will the sending Gmail add a signature? (its own one, read from Gmail)"""
+    if not _adds_signature(db, audit):
+        return False
+    if audit is not None and audit.email_account_id:
+        account = db.get(EmailAccount, audit.email_account_id)
+        return bool(account and account.gmail_signature_html)
+    # Rotation: any connected inbox may send it; one without a signature gets the name added at send time
+    return any(
+        a.gmail_signature_html
+        for a in db.query(EmailAccount).filter(EmailAccount.user_id == user_id, EmailAccount.status == "connected")
+    )
 
 
 def _sender_info(db: Session, user_id: str, audit: WebsiteAudit | None = None) -> dict:
@@ -196,8 +210,8 @@ def _sender_info(db: Session, user_id: str, audit: WebsiteAudit | None = None) -
         "contact_email": settings.contact_email if settings else "",
         "services": services,
         "free_offers": free_offers(settings),
-        # The signature (name, title, links) is added under the email when it is sent.
-        "signature_added": bool(signature_html(_audit_signature(db, audit, settings))),
+        # The sending Gmail's own signature (name, title, links) is added under the email when it is sent.
+        "signature_added": _signature_expected(db, user_id, audit),
     }
 
 
@@ -846,12 +860,14 @@ def send_audit(
 
     unsubscribe = unsubscribe_url(user_id, recipient)
     rfc_message_id = new_rfc_message_id(account.email_address)
-    signature = _audit_signature(db, audit, settings)
-    sent_body = body_html
-    if signature_html(signature):
-        # Drafts written before the signature was set end with the name/company: the signature carries them now.
-        sent_body = drop_ai_sign_off(body_html, settings.sender_name, settings.company_name)
-    signed_html, signed_text = append_signature(sent_body, _html_to_text(sent_body), signature)
+    # This Gmail's own signature (read from Gmail; never another account's)
+    sig_html, sig_text = account_signature(account) if _adds_signature(db, audit) else ("", "")
+    name, company = (settings.sender_name, settings.company_name) if settings else ("", "")
+    if sig_html:
+        sent_body = drop_ai_sign_off(body_html, name, company)  # the signature carries the name / company
+    else:
+        sent_body = ensure_sign_off(body_html, name, company)  # no signature: a bare "Best," gets the name
+    signed_html, signed_text = append_signature(sent_body, _html_to_text(sent_body), sig_html, sig_text)
     html_body = (
         f"{signed_html}"
         f'<p style="font-size:12px;color:#666">Not interested? <a href="{unsubscribe}">Unsubscribe</a></p>'

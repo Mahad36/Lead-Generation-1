@@ -129,26 +129,6 @@ export default function SettingsPage() {
             </p>
           </div>
           <div><Label>Target industries</Label><Input value={s.target_industries || ""} onChange={(e) => set("target_industries", e.target.value)} /></div>
-          <div>
-            <Label>Email signature</Label>
-            <Textarea
-              rows={5}
-              value={s.default_signature || ""}
-              placeholder={"Your Name\nFounder, Your Company\nyourwebsite.com\n+1 555 123 4567"}
-              onChange={(e) => set("default_signature", e.target.value)}
-            />
-            <p className="mt-1 text-xs text-muted">
-              Added under every email you send: audit emails, campaign emails using {"{{signature}}"} in the template,
-              and replies from the Replies page. One line per row; web and email addresses become links. Kept as plain
-              text (no logo) so cold emails look personal and stay out of the Promotions tab.
-            </p>
-            {(s.default_signature || "").trim() ? (
-              <div className="mt-2 rounded-lg border border-border bg-card p-3 text-sm">
-                <div className="mb-1 text-xs text-muted">Preview</div>
-                <div className="whitespace-pre-line">{s.default_signature.trim()}</div>
-              </div>
-            ) : null}
-          </div>
           <div className="space-y-2">
             <Label>Your services</Label>
             {(s.services || []).map((svc: any, i: number) => (

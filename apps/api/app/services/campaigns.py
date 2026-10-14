@@ -26,6 +26,7 @@ from app.services.gmail import GmailSendError, daily_limit_reached, send_gmail_m
 from app.services.limits import LimitValidationError, validate_send_limits
 from app.services.suppression import is_suppressed
 from app.services.templates import build_template_context, text_context
+from app.services.gmail_signature import account_signature
 from app.utils.signature import insert_signature
 from app.utils.templates import render_template
 
@@ -506,9 +507,6 @@ def generate_for_campaign_lead(db: Session, campaign_lead_id: str) -> CampaignLe
     cl.status = "generating"
     db.commit()
     context = build_template_context(db, campaign.user_id, lead)
-    add_signature = (campaign.extra or {}).get("add_signature", True) is not False
-    if not add_signature:
-        context["signature"] = ""  # "Add my signature" is off for this campaign: {{signature}} stays empty too
     settings = _settings_or_defaults(db, campaign.user_id)
     analysis = {}
     if lead.website and lead.website.analysis:
@@ -554,15 +552,7 @@ def generate_for_campaign_lead(db: Session, campaign_lead_id: str) -> CampaignLe
         cl.html_body = render_template(template.html_body, context)
         cl.personalized_message = ""
     cl.subject = render_template(template.subject, context)
-    text_ctx = text_context(context, db, campaign.user_id) if add_signature else context
-    cl.text_body = render_template(template.text_body or "", text_ctx) or ""
-    if add_signature and context.get("signature") and "{{signature}}" not in (template.html_body or ""):
-        # The template doesn't place it: add the signature under the email.
-        cl.html_body = insert_signature(
-            cl.html_body, context["signature"], context.get("sender_name", ""), context.get("sender_company", "")
-        )
-        if cl.text_body.strip() and "{{signature}}" not in (template.text_body or ""):
-            cl.text_body = f"{cl.text_body.rstrip()}\n\n{text_ctx['signature']}"
+    cl.text_body = render_template(template.text_body or "", text_context(context, db, campaign.user_id)) or ""
     cl.status = "ready" if campaign.require_approval else "approved"
     if not campaign.require_approval:
         cl.approved = True
@@ -783,6 +773,14 @@ def send_claimed_lead(db: Session, campaign_lead: CampaignLead) -> str:
     text_body = render_vars(campaign_lead.text_body or "", {"unsubscribe_url": unsub_url})
     if "unsubscribe" not in html_body.lower():
         html_body += f'<p style="font-size:12px;color:#666"><a href="{unsub_url}">Unsubscribe</a></p>'
+    if (campaign.extra or {}).get("add_signature", True) is not False:
+        # The sending Gmail's own signature (read from Gmail), above the Unsubscribe line
+        sig_html, sig_text = account_signature(account)
+        if sig_html:
+            html_body = insert_signature(html_body, sig_html, settings.sender_name if settings else "",
+                                         settings.company_name if settings else "")
+            if text_body.strip() and sig_text:
+                text_body = f"{text_body.rstrip()}\n\n{sig_text}"
     tracked = tracks_opens(db, campaign.user_id)  # adds the open-tracking image; the visible email is the same
 
     message = EmailMessage(

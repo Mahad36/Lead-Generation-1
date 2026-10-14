@@ -17,6 +17,7 @@ export type EmailAccount = {
   sent_today: number;
   remaining_today: number;
   paused_reason?: string;
+  gmail_signature?: { found: boolean; text: string; error: string };
 };
 
 /** What "no inbox chosen" means: rotation across every connected inbox, or the only one there is. */
@@ -105,5 +106,30 @@ export function SendFrom({
         </p>
       ) : null}
     </div>
+  );
+}
+
+/** Which of the sending Gmails have a signature (read from Gmail). Missing ones send without, so say so. */
+export function GmailSignatureStatus({ accountId }: { accountId: string }) {
+  const accounts = useEmailAccounts();
+  const sending = (accounts || []).filter((a) => a.status === "connected" && (!accountId || a.id === accountId));
+  if (!sending.length) return null;
+  const missing = sending.filter((a) => !a.gmail_signature?.found);
+  return (
+    <span className="mt-1 block space-y-0.5 text-xs">
+      {sending.map((a) => (
+        <span key={a.id} className={`block ${a.gmail_signature?.found ? "text-muted" : "text-amber-700 dark:text-amber-300"}`}>
+          {a.email_address}:{" "}
+          {a.gmail_signature?.found
+            ? (a.gmail_signature.text || "").split("\n").filter(Boolean).slice(0, 3).join(" · ") || "signature found"
+            : "no Gmail signature found, so its emails go out without one"}
+        </span>
+      ))}
+      {missing.length ? (
+        <Link href="/email-accounts" className="block text-primary underline">
+          Fix in Email setup
+        </Link>
+      ) : null}
+    </span>
   );
 }
