@@ -51,6 +51,7 @@ from app.services.suppression import is_suppressed
 from app.utils.normalize import normalize_email, normalize_url
 from app.services.contacts import company_already_contacted, recipient_options, select_recipients
 from app.services.gmail_signature import account_signature
+from app.utils.greeting import apply_greeting, owner_first_name
 from app.utils.signature import append_signature, drop_ai_sign_off, ensure_sign_off
 
 logger = get_logger("website_audit")
@@ -255,6 +256,8 @@ def _lead_info(lead: Lead) -> dict:
     return {
         "business_name": lead.business_name,
         "contact_name": lead.contact_name,
+        # Who the email greets: the owner's / recipient's first name, or "" for "Hi there,"
+        "greeting_name": owner_first_name(lead),
         "category": lead.category,
         "city": lead.city,
         "country": lead.country,
@@ -1065,6 +1068,8 @@ def send_audit(
     # This Gmail's own signature (read from Gmail; never another account's)
     sig_html, sig_text = account_signature(account) if _adds_signature(db, audit) else ("", "")
     name, company = (settings.sender_name, settings.company_name) if settings else ("", "")
+    # "Hi <owner's first name>," or "Hi there," (never the business name), also for drafts written earlier
+    body_html = apply_greeting(body_html, owner_first_name(lead, recipient))
     if sig_html:
         sent_body = drop_ai_sign_off(body_html, name, company)  # the signature carries the name / company
     else:

@@ -38,7 +38,8 @@ audit attached. The owner hasn't replied.
 {style}
 Rules for the follow-up:
 - 30-70 words, 2-3 short paragraphs, plain text (no HTML, no links unless one appears in the first email).
-- Start with "Hi <first name or business name>," on its own line.
+- Start with "Hi <recipient.first_name>," on its own line when a first name is given, otherwise exactly
+  "Hi there,". Never greet the business name.
 - Don't repeat the first email. Add one new, small, useful angle: a single specific detail from the audit, how quick
   the free offer is for them, or a simple question. The last follow-up can politely close the loop ("I'll leave it
   here").
@@ -148,8 +149,10 @@ def _adds_signature(db: Session, root: EmailMessage) -> bool:
 
 
 def _first_name(lead: Lead | None, root: EmailMessage) -> str:
-    name = (lead.contact_name if lead else "") or ""
-    return name.split()[0] if name.strip() else (lead.business_name if lead else root.recipient_name) or "there"
+    """The owner's / recipient's first name, or "there" (never the business name)."""
+    from app.utils.greeting import owner_first_name
+
+    return owner_first_name(lead, getattr(root, "recipient_email", None)) or "there"
 
 
 def _fallback_body(step: int, steps: int, lead: Lead | None, root: EmailMessage, signature_added: bool, sender: str) -> str:
@@ -184,7 +187,7 @@ def _write_body(
         "total_follow_ups": steps,
         "is_last": step >= steps,
         "recipient": {
-            "first_name": (lead.contact_name.split()[0] if lead and lead.contact_name.strip() else ""),
+            "first_name": _first_name(lead, root) if _first_name(lead, root) != "there" else "",
             "business_name": lead.business_name if lead else root.recipient_name,
             "category": lead.category if lead else "",
             "city": lead.city if lead else "",
@@ -259,6 +262,10 @@ def send_followup(db: Session, root: EmailMessage, step: int, steps: int) -> Ema
         headers["In-Reply-To"] = chain[-1]
         headers["References"] = " ".join(chain[-20:])
     unsubscribe = unsubscribe_url(root.user_id, root.recipient_email)
+    from app.utils.greeting import apply_greeting_text
+
+    first = _first_name(lead, root)
+    body = apply_greeting_text(body, "" if first == "there" else first)
     html, text = append_signature(_paragraphs_html(body), body, sig_html, sig_text)
     html += f'<p style="font-size:12px;color:#666">Not interested? <a href="{unsubscribe}">Unsubscribe</a></p>'
     text += f"\n\nUnsubscribe: {unsubscribe}"

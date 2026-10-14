@@ -218,7 +218,8 @@ Rules:
 - When audit.outreach_angle is given, build the opening on it (it is the strongest verified observation,
   possibly edited by the sender); you may mention the platform (e.g. "your Shopify store"). Never present something
   the audit only "couldn't detect" as a fact, and never promise results.
-- Greet recipient_business.contact_name by first name when it is given; otherwise greet the business's team by name.
+- Start with "Hi <recipient_business.greeting_name>," when greeting_name is given (the owner / the person it goes
+  to); otherwise start with exactly "Hi there,". Never greet the business name or "team".
 - Open with one specific thing you noticed on their site (from the audit), not with who you are.
 - Mention 1-2 more findings in terms of this business (its name, services or location), so the email could not be
   sent unchanged to anyone else. The full audit PDF is attached; say so once, briefly.

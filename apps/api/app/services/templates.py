@@ -125,9 +125,10 @@ def build_template_context(db: Session, user_id: str, lead: Lead | None) -> dict
         analysis = lead.website.analysis
     elif lead and lead.website:
         analysis = db.query(WebsiteAnalysis).filter(WebsiteAnalysis.website_id == lead.website.id).first()
-    first_name = ""
-    if lead and lead.business_name:
-        first_name = lead.business_name.split()[0]
+    from app.utils.greeting import owner_first_name
+
+    # {{first_name}}: the owner's / contact's first name; "there" when unknown (never the business name)
+    first_name = (owner_first_name(lead) or "there") if lead else "Sam"
     issues = (analysis.issues if analysis else []) or []
     recs = (analysis.recommended_services if analysis else []) or []
     services = (analysis.services if analysis else []) or []
