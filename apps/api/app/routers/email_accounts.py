@@ -1,6 +1,6 @@
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import RedirectResponse
 from sqlalchemy.orm import Session
 
@@ -288,6 +288,39 @@ def set_warmup(account_id: str, payload: WarmupIn, user: User = Depends(get_curr
     account.warmup_enabled = payload.enabled
     db.commit()
     return {"warmup_enabled": account.warmup_enabled}
+
+
+@router.post("/{account_id}/signature/upload")
+async def upload_signature(
+    account_id: str,
+    file: UploadFile = File(...),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Use an HTML file as this account's signature (only this account; never replaced automatically)."""
+    from app.services.gmail_signature import use_uploaded_signature
+
+    account = _own_account(db, user, account_id)
+    try:
+        return use_uploaded_signature(db, account, await file.read())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+class SignatureSourceIn(BaseModel):
+    source: str  # gmail (read it from emails written in Gmail) | none (no signature)
+
+
+@router.post("/{account_id}/signature/source")
+def signature_source(
+    account_id: str, payload: SignatureSourceIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)
+):
+    from app.services.gmail_signature import set_signature_source
+
+    try:
+        return set_signature_source(db, _own_account(db, user, account_id), payload.source)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("/{account_id}/signature/refresh")

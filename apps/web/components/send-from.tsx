@@ -122,7 +122,7 @@ export function GmailSignatureStatus({ accountId }: { accountId: string }) {
           {a.email_address}:{" "}
           {a.gmail_signature?.found
             ? (a.gmail_signature.text || "").split("\n").filter(Boolean).slice(0, 3).join(" · ") || "signature found"
-            : "no Gmail signature found, so its emails go out without one"}
+            : "no signature (upload one in Email setup), so its emails go out without one"}
         </span>
       ))}
       {missing.length ? (

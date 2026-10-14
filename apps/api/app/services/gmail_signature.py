@@ -106,6 +106,8 @@ def refresh_signature(db: Session, account: EmailAccount) -> dict:
     """Read this account's current Gmail signature from its own Sent folder and store it on the account."""
     from app.services.inbox import _find_sent_folder, imap_host_for
 
+    if account.signature_source != "gmail":
+        return signature_info(account)  # an uploaded signature (or "none") is never replaced automatically
     now = datetime.now(UTC)
     data = _smtp_payload(account)
     if not data:
@@ -189,7 +191,7 @@ def refresh_due(db: Session) -> int:
     cutoff = datetime.now(UTC) - CHECK_EVERY
     checked = 0
     for account in db.query(EmailAccount).filter(EmailAccount.status == "connected"):
-        if not _smtp_payload(account):
+        if not _smtp_payload(account) or account.signature_source != "gmail":
             continue
         if account.gmail_signature_checked_at and account.gmail_signature_checked_at > cutoff:
             continue
@@ -204,17 +206,87 @@ def refresh_due(db: Session) -> int:
 
 def account_signature(account: EmailAccount | None) -> tuple[str, str]:
     """(html, text) to add under an email sent from this account, in Gmail's own layout. ("", "") when none."""
-    if not account or not account.gmail_signature_html:
+    if not account or not account.gmail_signature_html or getattr(account, "signature_source", "gmail") == "none":
         return "", ""
     return f'<br clear="all"><br>{account.gmail_signature_html}', account.gmail_signature_text
 
 
 def signature_info(account: EmailAccount) -> dict:
     return {
-        "found": bool(account.gmail_signature_html),
+        "source": account.signature_source,  # gmail | uploaded | none
+        "found": bool(account.gmail_signature_html) and account.signature_source != "none",
         "html": account.gmail_signature_html,
         "text": account.gmail_signature_text,
         "from_email_dated": account.gmail_signature_from,
         "checked_at": account.gmail_signature_checked_at,
         "error": account.gmail_signature_error,
     }
+
+
+MAX_UPLOAD_BYTES = 200_000
+
+
+def clean_uploaded_html(raw: str) -> tuple[str, str]:
+    """(html, text) of an uploaded signature file: the body's content, with anything executable removed.
+    Inline styles and image links are kept, so it looks the same as in your email client."""
+    soup = BeautifulSoup(raw or "", "lxml")
+    root = soup.body or soup
+    for tag in root.find_all(["script", "iframe", "object", "embed", "form", "input", "button", "link", "meta", "title"]):
+        tag.decompose()
+    for tag in root.find_all(True):
+        for attr in list(tag.attrs):
+            value = str(tag.attrs.get(attr, ""))
+            if attr.lower().startswith("on") or value.strip().lower().startswith("javascript:"):
+                del tag.attrs[attr]
+    # <style> blocks are dropped by most email clients: keep them only if there is nothing else
+    styles = root.find_all("style")
+    html = "".join(str(child) for child in root.children).strip()
+    if styles and len(styles) == len(root.find_all(True)):
+        html = ""
+    text = "\n".join(line.strip() for line in root.get_text("\n").splitlines() if line.strip())
+    return html, text
+
+
+def use_uploaded_signature(db: Session, account: EmailAccount, raw: bytes) -> dict:
+    """Store an uploaded HTML signature for this account only; it is used from now on and never auto-replaced."""
+    if len(raw) > MAX_UPLOAD_BYTES:
+        raise ValueError("That file is too big for a signature (max 200 KB). Host images online instead of embedding them.")
+    try:
+        text_raw = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        text_raw = raw.decode("latin-1")
+    html, text = clean_uploaded_html(text_raw)
+    if not html or (not text and "<img" not in html):
+        raise ValueError("No signature found in that file. Upload the .html file of the signature itself.")
+    if "data:image" in html and len(html) > 100_000:
+        raise ValueError("Embedded (base64) images make emails heavy and often get blocked. Use image links instead.")
+    html, broken = drop_broken_images(f'<div class="gmail_signature" data-smartmail="gmail_signature">{html}</div>')
+    account.signature_source = "uploaded"
+    account.gmail_signature_html, account.gmail_signature_text = html, text
+    account.gmail_signature_from = None
+    account.gmail_signature_checked_at = datetime.now(UTC)
+    account.gmail_signature_error = (
+        f"{len(broken)} image(s) in the uploaded signature don't load ({', '.join(broken[:4])}), so they are left out. "
+        "Check the image links (they must be public https URLs) and upload again."
+        if broken
+        else ""
+    )
+    db.commit()
+    logger.info("signature_uploaded", account_id=account.id, broken_images=len(broken))
+    return signature_info(account)
+
+
+def set_signature_source(db: Session, account: EmailAccount, source: str) -> dict:
+    """Switch back to reading the signature from Gmail, or send without a signature."""
+    if source not in ("gmail", "none"):
+        raise ValueError("Unknown signature source")
+    account.signature_source = source
+    if source == "none":
+        account.gmail_signature_error = ""
+    else:
+        account.gmail_signature_html = account.gmail_signature_text = ""
+        account.gmail_signature_from = account.gmail_signature_checked_at = None
+        db.commit()
+        return refresh_signature(db, account)
+    db.commit()
+    return signature_info(account)

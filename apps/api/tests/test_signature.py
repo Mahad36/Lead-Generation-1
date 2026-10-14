@@ -75,3 +75,18 @@ def test_images_that_do_not_load_are_left_out():
         '<div class="gmail_signature" data-smartmail="gmail_signature"><img alt="Logo" src=""><b>Ahad</b></div>'
     )
     assert removed == ["Logo"] and "<img" not in html and "Ahad" in html
+
+
+def test_uploaded_html_signature_is_cleaned():
+    from app.services.gmail_signature import clean_uploaded_html
+
+    raw = (
+        "<html><head><title>sig</title><script>alert(1)</script></head><body>"
+        '<table><tr><td style="color:#111"><b>Mahad</b><br>Bee Creative</td>'
+        '<td><a href="https://beecreative.pk" onclick="steal()">beecreative.pk</a></td></tr></table>'
+        '<a href="javascript:evil()">x</a></body></html>'
+    )
+    html, text = clean_uploaded_html(raw)
+    assert "<script" not in html and "onclick" not in html and "javascript:" not in html and "<title" not in html
+    assert 'style="color:#111"' in html and "https://beecreative.pk" in html  # styling and links are kept
+    assert text.splitlines()[:2] == ["Mahad", "Bee Creative"]

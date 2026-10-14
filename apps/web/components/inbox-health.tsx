@@ -3,8 +3,8 @@
 import { Badge, Button } from "@/components/ui";
 import { api } from "@/lib/api";
 import { formatDate } from "@/lib/utils";
-import { Loader2 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { Loader2, Upload } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 export type HealthSummary = {
@@ -61,6 +61,7 @@ export type InboxHealthAccount = {
     from_email_dated: string | null;
     checked_at: string | null;
     error: string;
+    source?: "gmail" | "uploaded" | "none";
   };
 };
 
@@ -114,7 +115,7 @@ export function InboxHealth({ account, inboxes, onChange }: { account: InboxHeal
         </div>
       ) : null}
 
-      {smtp ? <GmailSignature account={a} busy={busy} onRefresh={() => run("signature/refresh", "")} /> : null}
+      {smtp ? <GmailSignature account={a} busy={busy} onRefresh={() => run("signature/refresh", "")} onChanged={onChange} /> : null}
 
       {a.ramping_up ? (
         <p className="text-xs text-muted">
@@ -193,42 +194,116 @@ export function InboxHealth({ account, inboxes, onChange }: { account: InboxHeal
 }
 
 /** This Gmail's own signature, read from Gmail (read-only: edit it in Gmail's settings). */
-function GmailSignature({ account, busy, onRefresh }: { account: InboxHealthAccount; busy: string; onRefresh: () => void }) {
+function GmailSignature({
+  account,
+  busy,
+  onRefresh,
+  onChanged,
+}: {
+  account: InboxHealthAccount;
+  busy: string;
+  onRefresh: () => void;
+  onChanged: () => void;
+}) {
   const sig = account.gmail_signature;
+  const source = sig?.source || "gmail";
+  const [working, setWorking] = useState("");
+  const file = useRef<HTMLInputElement>(null);
   const refreshing = busy === "signature/refresh";
+
+  async function upload(f: File) {
+    setWorking("upload");
+    try {
+      const fd = new FormData();
+      fd.append("file", f);
+      await api(`/api/email-accounts/${account.id}/signature/upload`, { method: "POST", body: fd });
+      toast.success(`Signature uploaded for ${account.email_address}`);
+      onChanged();
+    } catch (e) {
+      toast.error((e as Error).message);
+    } finally {
+      setWorking("");
+      if (file.current) file.current.value = "";
+    }
+  }
+
+  async function useSource(next: "gmail" | "none") {
+    setWorking(next);
+    try {
+      await api(`/api/email-accounts/${account.id}/signature/source`, { method: "POST", body: JSON.stringify({ source: next }) });
+      toast.success(next === "none" ? "This account now sends without a signature" : "Reading the signature from Gmail again");
+      onChanged();
+    } catch (e) {
+      toast.error((e as Error).message);
+    } finally {
+      setWorking("");
+    }
+  }
+
+  const disabled = !!busy || !!working;
   return (
-    <div className="space-y-1 rounded-md border border-border p-2">
+    <div className="space-y-2 rounded-md border border-border p-2">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <span className="font-medium">Gmail signature</span>
-        <Button variant="secondary" disabled={!!busy} onClick={onRefresh}>
-          {refreshing ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
-          {refreshing ? "Reading from Gmail..." : "Refresh"}
-        </Button>
+        <span className="flex items-center gap-2">
+          <span className="font-medium">Signature</span>
+          <Badge>{source === "uploaded" ? "Uploaded HTML" : source === "none" ? "No signature" : "Read from Gmail"}</Badge>
+        </span>
+        <span className="flex flex-wrap gap-2">
+          <input
+            ref={file}
+            type="file"
+            accept=".html,.htm,text/html"
+            className="hidden"
+            onChange={(e) => e.target.files?.[0] && upload(e.target.files[0])}
+          />
+          <Button variant="secondary" disabled={disabled} onClick={() => file.current?.click()}>
+            {working === "upload" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />}
+            {source === "uploaded" ? "Replace HTML file" : "Upload HTML signature"}
+          </Button>
+          {source !== "gmail" ? (
+            <Button variant="ghost" disabled={disabled} onClick={() => useSource("gmail")}>
+              Read from Gmail instead
+            </Button>
+          ) : (
+            <Button variant="secondary" disabled={disabled} onClick={onRefresh}>
+              {refreshing ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+              {refreshing ? "Reading from Gmail..." : "Refresh from Gmail"}
+            </Button>
+          )}
+          {source !== "none" ? (
+            <Button variant="ghost" disabled={disabled} onClick={() => useSource("none")}>
+              No signature
+            </Button>
+          ) : null}
+        </span>
       </div>
-      {sig?.found ? (
+      {source === "none" ? (
+        <p className="text-xs text-muted">Emails from this account go out without a signature (your name is added to the sign-off).</p>
+      ) : sig?.found ? (
         <>
           <iframe
             title={`Signature of ${account.email_address}`}
             sandbox=""
-            className="h-32 w-full rounded border border-border bg-white"
+            className="h-40 w-full rounded border border-border bg-white"
             srcDoc={`<div style="font-family:Arial,sans-serif;font-size:13px;color:#222;padding:6px">${sig.html}</div>`}
           />
           <p className="text-xs text-muted">
-            Read from an email you wrote in this Gmail
-            {sig.from_email_dated ? ` on ${formatDate(sig.from_email_dated)}` : ""}. Added under every email this
-            account sends. To change it, edit the signature in Gmail, send one email from Gmail (e.g. to yourself),
-            then press Refresh (it is also re-checked daily).
+            {source === "uploaded"
+              ? "From the HTML file you uploaded. Added under every email this account sends (only this account). It is never replaced automatically; upload a new file to change it."
+              : `Read from an email written in this Gmail${sig.from_email_dated ? ` on ${formatDate(sig.from_email_dated)}` : ""}. If it isn't yours, upload your own HTML signature instead.`}
           </p>
           {sig.error ? <p className="text-xs text-amber-700 dark:text-amber-300">{sig.error}</p> : null}
         </>
       ) : (
         <p className="text-xs text-amber-700 dark:text-amber-300">
-          {sig?.checked_at
-            ? sig.error || "No signature found."
-            : "Not checked yet. Press Refresh."}{" "}
-          Emails from this account go out without a signature until one is found.
+          {sig?.checked_at ? sig.error || "No signature found." : "Not checked yet."} Upload your HTML signature, or emails
+          from this account go out without one.
         </p>
       )}
+      <p className="text-xs text-muted">
+        Tip: in Gmail, open a sent email with your signature, use &quot;Show original&quot; or copy the signature into an
+        .html file. Images must be public https links (not attachments) so recipients can see them.
+      </p>
     </div>
   );
 }
