@@ -74,3 +74,50 @@ def test_send_now_ignores_hours():
     lead = SimpleNamespace(country="Australia", city="Sydney", address="")
     deliverability.require_send_time(None, "u", {"mode": "now", "days": [], "start": 9, "end": 11, "start_at": None}, lead)
     assert next_send_time(None, "u", {"mode": "now"}, "") <= datetime.now(UTC) + timedelta(seconds=1)
+
+
+def _slot(day_offset: int, start: str, end: str, zone=None) -> dict:
+    day = (datetime.now(zone or UTC) + timedelta(days=day_offset)).date().isoformat()
+    return {"date": day, "start": start, "end": end}
+
+
+def test_chosen_dates_and_times():
+    lead = SimpleNamespace(country="United Kingdom", city="London", address="")
+    london = ZoneInfo("Europe/London")
+    now = datetime.now(london)
+    window_now = {"date": now.date().isoformat(), "start": "00:00", "end": "24:00"}
+    schedule = {"mode": "slots", "slots": [window_now], "slots_zone": "lead", "my_timezone": "Asia/Karachi"}
+    deliverability.require_send_time(None, "u", schedule, lead)  # inside today's window: sends now
+
+    later = [_slot(3, "13:00", "15:00", london), _slot(2, "18:30", "19:00", london)]
+    schedule["slots"] = later
+    opens = next_send_time(None, "u", schedule, "Europe/London").astimezone(london)
+    assert (opens.date() - now.date()).days == 2 and (opens.hour, opens.minute) == (18, 30)  # the earliest window
+    with pytest.raises(SendDeferred) as caught:
+        deliverability.require_send_time(None, "u", schedule, lead)
+    assert caught.value.step == deliverability.WAITING_FOR_SCHEDULE
+
+    schedule["slots_zone"] = "mine"  # the same times, in Karachi
+    opens = next_send_time(None, "u", schedule, "Europe/London").astimezone(ZoneInfo("Asia/Karachi"))
+    assert (opens.hour, opens.minute) == (18, 30)
+
+    schedule["slots"] = [_slot(-2, "09:00", "11:00", london)]  # every date has passed
+    with pytest.raises(SendDeferred) as caught:
+        deliverability.require_send_time(None, "u", schedule, lead)
+    assert "passed" in str(caught.value)
+
+
+def test_schedule_slots_validation():
+    from pydantic import ValidationError
+
+    from app.schemas.scraping import ScheduleIn
+
+    with pytest.raises(ValidationError):
+        ScheduleIn(mode="slots", slots=[])
+    with pytest.raises(ValidationError):
+        ScheduleIn(mode="slots", slots=[{"date": "2026-10-20", "start": "15:00", "end": "13:00"}])
+    s = ScheduleIn(
+        mode="slots",
+        slots=[{"date": "2026-10-22", "start": "09:00", "end": "11:00"}, {"date": "2026-10-20", "start": "13:00", "end": "24:00"}],
+    ).as_dict()
+    assert [x["date"] for x in s["slots"]] == ["2026-10-20", "2026-10-22"] and s["slots_zone"] == "mine"

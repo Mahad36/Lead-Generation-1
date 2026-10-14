@@ -4,7 +4,7 @@ import { FileOutreachControls, OutreachModePicker, type FileOutreach, type Outre
 import { BusinessTypeSelect } from "@/components/business-types";
 import { LocationPicker, searchArea, type Location } from "@/components/location-picker";
 import { DEFAULT_RECIPIENTS, RecipientOptionsBox, recipientsForApi, type RecipientOptions } from "@/components/email-rotation";
-import { CitySuggestions, DEFAULT_SCHEDULE, SchedulePicker, scheduleForApi, type Schedule } from "@/components/schedule-picker";
+import { CitySuggestions, DEFAULT_SCHEDULE, SchedulePicker, scheduleForApi, slotsProblem, type Schedule } from "@/components/schedule-picker";
 import { SendFrom } from "@/components/send-from";
 import { OutreachTable, type OutreachLead } from "@/components/outreach";
 import { Badge, Button, Card, Input, Label } from "@/components/ui";
@@ -151,6 +151,10 @@ export default function ScrapingPage() {
     }
     if (outreachMode !== "off" && schedule.mode === "local" && !schedule.days.length) {
       toast.error("Pick at least one day in the sending schedule");
+      return;
+    }
+    if (outreachMode !== "off" && slotsProblem(schedule)) {
+      toast.error(slotsProblem(schedule));
       return;
     }
     // Every place x every business type. "Miami, Florida" (or the whole state) keeps the Maps search unambiguous.

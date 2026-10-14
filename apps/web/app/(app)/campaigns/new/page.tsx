@@ -11,7 +11,7 @@ import {
   type RecipientOptions,
   type Rotation,
 } from "@/components/email-rotation";
-import { DEFAULT_SCHEDULE, SchedulePicker, scheduleForApi, type Schedule } from "@/components/schedule-picker";
+import { DEFAULT_SCHEDULE, SchedulePicker, scheduleForApi, slotsProblem, type Schedule } from "@/components/schedule-picker";
 import { GmailSignatureStatus } from "@/components/send-from";
 import { Badge, Button, Card, Input, Label, Textarea } from "@/components/ui";
 import { api } from "@/lib/api";
@@ -198,6 +198,11 @@ function NewCampaignForm() {
   }
 
   async function create(sendNow: boolean) {
+    const problem = audit ? slotsProblem(schedule) : "";
+    if (problem) {
+      toast.error(problem);
+      return;
+    }
     setSaving(true);
     try {
       const campaign = await api<{ id: string }>("/api/campaigns", {

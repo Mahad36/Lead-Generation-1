@@ -1,8 +1,8 @@
-from datetime import datetime
+from datetime import date, datetime
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class ScrapingSearchIn(BaseModel):
@@ -11,15 +11,33 @@ class ScrapingSearchIn(BaseModel):
     category: str = Field(min_length=1, max_length=255)
 
 
+class ScheduleSlotIn(BaseModel):
+    """One chosen date with a time window, e.g. 2026-10-16 from 13:00 until 15:00."""
+
+    date: date
+    start: str = Field(default="09:00", pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
+    end: str = Field(default="11:00", pattern=r"^([01]\d|2[0-3]):[0-5]\d$|^24:00$")
+
+    @model_validator(mode="after")
+    def end_after_start(self) -> "ScheduleSlotIn":
+        if self.end <= self.start:
+            raise ValueError(f"{self.date}: the end time must be after the start time")
+        return self
+
+
 class ScheduleIn(BaseModel):
     """When automatic emails go out. "local": these days and hours in each lead's own time zone;
-    "global": your sending hours (AI & settings). start_at: nothing goes out before this moment."""
+    "global": your sending hours (AI & settings); "slots": only on the chosen dates and times
+    (slots_zone "mine": your time, "lead": each lead's own time). start_at: nothing goes out before this moment."""
 
-    mode: Literal["local", "global", "now"] = "local"  # now: as soon as each email is ready
+    mode: Literal["local", "global", "now", "slots"] = "local"  # now: as soon as each email is ready
     days: list[int] = Field(default_factory=lambda: [1, 2, 3])  # Monday = 0 ... Sunday = 6
     start: int = Field(default=9, ge=0, le=23)
     end: int = Field(default=11, ge=1, le=24)
     start_at: datetime | None = None
+    slots: list[ScheduleSlotIn] = Field(default_factory=list, max_length=100)
+    slots_zone: Literal["mine", "lead"] = "mine"
+    my_timezone: str = ""  # your browser's time zone (for "mine"); the computer's if empty
 
     @field_validator("days")
     @classmethod
@@ -29,9 +47,17 @@ class ScheduleIn(BaseModel):
             raise ValueError("Pick at least one day to send on")
         return days
 
+    @model_validator(mode="after")
+    def slots_chosen(self) -> "ScheduleIn":
+        if self.mode == "slots" and not self.slots:
+            raise ValueError("Add at least one date and time to send on")
+        self.slots = sorted(self.slots, key=lambda s: (s.date, s.start))
+        return self
+
     def as_dict(self) -> dict:
         data = self.model_dump()
         data["start_at"] = self.start_at.isoformat() if self.start_at else None
+        data["slots"] = [{"date": s.date.isoformat(), "start": s.start, "end": s.end} for s in self.slots]
         return data
 
 

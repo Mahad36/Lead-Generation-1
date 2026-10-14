@@ -283,6 +283,47 @@ def _start_at(schedule: dict | None) -> datetime | None:
     return value if value.tzinfo else value.astimezone()
 
 
+SLOTS_ENDED = timedelta(days=3650)  # every chosen date and time has passed: wait until new ones are added
+
+
+def _slot_zone(schedule: dict, tz: str):
+    """Chosen dates and times are in your time ("mine") or in each lead's own time ("lead")."""
+    if schedule.get("slots_zone") == "lead" and tz:
+        return ZoneInfo(tz)
+    try:
+        return ZoneInfo(schedule["my_timezone"]) if schedule.get("my_timezone") else None
+    except Exception:
+        return None
+
+
+def _slot_times(slot: dict, zone) -> tuple[datetime, datetime] | None:
+    try:
+        day = date.fromisoformat(str(slot["date"]))
+        (sh, sm), (eh, em) = (map(int, str(slot[k]).split(":")) for k in ("start", "end"))
+    except (KeyError, ValueError):
+        return None
+
+    def at(h: int, m: int) -> datetime:
+        moment = datetime(day.year, day.month, day.day, tzinfo=zone) + timedelta(hours=h, minutes=m)
+        return moment if zone else moment.astimezone()  # no zone: this computer's time
+
+    return at(sh, sm), at(eh, em)
+
+
+def next_slot_time(schedule: dict, tz: str, probe: datetime) -> datetime:
+    """Now (the probe) inside a chosen window, else the start of the next one; far ahead when all have passed."""
+    zone = _slot_zone(schedule, tz)
+    upcoming = []
+    for slot in schedule.get("slots") or []:
+        times = _slot_times(slot, zone)
+        if not times or times[1] <= probe:
+            continue
+        if times[0] <= probe:
+            return probe
+        upcoming.append(times[0])
+    return min(upcoming) if upcoming else probe + SLOTS_ENDED
+
+
 def next_send_time(db: Session, user_id: str, schedule: dict | None, tz: str) -> datetime:
     """When an automatic email under this schedule may go out (now when it may go now)."""
     now = datetime.now(UTC)
@@ -290,6 +331,8 @@ def next_send_time(db: Session, user_id: str, schedule: dict | None, tz: str) ->
     probe = max(now, start_at) if start_at else now
     if schedule and schedule.get("mode") == "now":
         return probe  # send now: no hours restriction (daily limits and spacing still apply)
+    if schedule and schedule.get("mode") == "slots":
+        return next_slot_time(schedule, tz, probe)
     if not schedule or schedule.get("mode") != "local" or not tz:
         settings = _settings(db, user_id)
         local = probe.astimezone()
@@ -307,6 +350,12 @@ def next_send_time(db: Session, user_id: str, schedule: dict | None, tz: str) ->
     return local
 
 
+def schedule_uses_lead_time(schedule: dict | None) -> bool:
+    """Is this schedule in each lead's own time zone (so the lead's time zone is needed)?"""
+    mode = (schedule or {}).get("mode")
+    return mode == "local" or (mode == "slots" and (schedule or {}).get("slots_zone") == "lead")
+
+
 def send_time_ok(db: Session, user_id: str, schedule: dict | None, tz: str) -> bool:
     return next_send_time(db, user_id, schedule, tz) <= datetime.now(UTC) + timedelta(seconds=1)
 
@@ -315,11 +364,16 @@ def require_send_time(db: Session, user_id: str, schedule: dict | None, lead) ->
     """Automatic sends: wait for the file's / campaign's schedule (in the lead's time), else your sending hours."""
     if schedule and schedule.get("mode") == "now" and not schedule.get("start_at"):
         return  # send now
-    if not schedule or (schedule.get("mode") not in ("local", "now") and not schedule.get("start_at")):
+    if not schedule or (schedule.get("mode") not in ("local", "now", "slots") and not schedule.get("start_at")):
         require_send_window(db, user_id)
         return
-    tz = lead_timezone(lead) if schedule.get("mode") == "local" else ""
+    tz = lead_timezone(lead) if schedule_uses_lead_time(schedule) else ""
     opens = next_send_time(db, user_id, schedule, tz)
+    if opens - datetime.now(UTC) > SLOTS_ENDED - timedelta(days=1):
+        raise SendDeferred(
+            "Scheduled: all the dates and times you chose have passed. Add a new date to send this email.",
+            WAITING_FOR_SCHEDULE,
+        )
     if opens > datetime.now(UTC) + timedelta(seconds=1):
         where = f" ({opens:%a %H:%M} their time)" if tz else ""
         mine = opens.astimezone()

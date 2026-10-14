@@ -129,11 +129,12 @@ def process_campaign_queue(campaign_id: str) -> dict:
             if delay is not None:
                 _continue_queue(campaign_id, delay)
             return {"status": result}
-        from app.services.deliverability import next_send_time
+        from app.services.deliverability import next_send_time, schedule_uses_lead_time
 
         schedule = (campaign.extra or {}).get("schedule")
-        tz = (campaign.extra or {}).get("timezone", "") if schedule and schedule.get("mode") == "local" else ""
+        tz = (campaign.extra or {}).get("timezone", "") if schedule_uses_lead_time(schedule) else ""
         wait = max(int((next_send_time(db, campaign.user_id, schedule, tz) - datetime.now(UTC)).total_seconds()), 0)
+        wait = min(wait, 6 * 3600)  # look again at least every 6 hours (e.g. all chosen dates have passed)
         if wait:
             # Before the campaign's schedule (or outside your sending hours): carry on when it opens
             _continue_queue(campaign_id, wait + 5)

@@ -133,16 +133,16 @@ def _on_hold(db: Session, root: EmailMessage) -> bool:
 
 def _send_time_ok(db: Session, root: EmailMessage) -> bool:
     """The file's / campaign's schedule in the lead's time zone, else your sending hours."""
-    from app.services.deliverability import lead_timezone, send_time_ok
+    from app.services.deliverability import lead_timezone, schedule_uses_lead_time, send_time_ok
 
     campaign, job, _ = _origin(db, root)
     schedule = ((campaign.extra if campaign else None) or (job.extra if job else None) or {}).get("schedule")
     if schedule and schedule.get("mode") == "now":
         return send_time_ok(db, root.user_id, schedule, "")
-    if not schedule or (schedule.get("mode") != "local" and not schedule.get("start_at")):
+    if not schedule or (schedule.get("mode") not in ("local", "slots") and not schedule.get("start_at")):
         return in_send_window(_settings(db, root.user_id))
     lead = db.get(Lead, root.lead_id) if root.lead_id else None
-    return send_time_ok(db, root.user_id, schedule, lead_timezone(lead) if schedule.get("mode") == "local" else "")
+    return send_time_ok(db, root.user_id, schedule, lead_timezone(lead) if schedule_uses_lead_time(schedule) else "")
 
 
 def _adds_signature(db: Session, root: EmailMessage) -> bool:
