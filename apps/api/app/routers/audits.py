@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -57,6 +58,8 @@ def start_audit(
 def list_audits(
     lead_id: str | None = Query(default=None),
     q: str | None = Query(default=None, max_length=200),
+    platform: str | None = Query(default=None, max_length=64),
+    finding_type: str | None = Query(default=None, max_length=32),
     page: int | None = Query(default=None, ge=1),
     page_size: int = Query(default=25, ge=1, le=200),
     user: User = Depends(get_current_user),
@@ -64,7 +67,9 @@ def list_audits(
 ):
     """Audits, newest first. With `page`: {items, total, page, page_size} (Website audits page); else the latest 50."""
     offset = (page - 1) * page_size if page else 0
-    audits = audit_service.list_audits(db, user.id, lead_id, q=q, limit=page_size if page else 50, offset=offset)
+    audits = audit_service.list_audits(
+        db, user.id, lead_id, q=q, limit=page_size if page else 50, offset=offset, platform=platform, finding_type=finding_type
+    )
     for audit in audits:
         audit_service._expire_stale(db, audit)
     # Platform from the audit's own detection, else the lead's (from the website analysis)
@@ -79,7 +84,40 @@ def list_audits(
         items.append(data)
     if not page:
         return items
-    return {"items": items, "total": audit_service.count_audits(db, user.id, lead_id, q=q), "page": page, "page_size": page_size}
+    total = audit_service.count_audits(db, user.id, lead_id, q=q, platform=platform, finding_type=finding_type)
+    return {"items": items, "total": total, "page": page, "page_size": page_size}
+
+
+@router.get("/audits/platforms")
+def audit_platforms(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Platforms among your audits, with counts (for the filter)."""
+    return audit_service.audit_platforms(db, user.id)
+
+
+class AngleIn(BaseModel):
+    text: str = Field(default="", max_length=1500)
+
+
+@router.post("/audits/{audit_id}/outreach-angle")
+def save_outreach_angle(audit_id: str, payload: AngleIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Your edited outreach angle: used when the email is (re)drafted."""
+    return audit_service.serialize_audit(audit_service.set_outreach_angle(db, user.id, audit_id, payload.text))
+
+
+@router.post("/audits/reprocess-platform")
+def reprocess_platform(payload: dict | None = None, user: User = Depends(get_current_user)):
+    """Add platform intelligence to older audits in the background, a few at a time (findings are kept)."""
+    from app.services.platform_reprocess import start
+
+    body = payload or {}
+    return start(user.id, limit=int(body.get("limit") or 25), with_ai=bool(body.get("with_ai", True)))
+
+
+@router.get("/audits/reprocess-platform")
+def reprocess_status(user: User = Depends(get_current_user)):
+    from app.services.platform_reprocess import status
+
+    return status(user.id)
 
 
 @router.get("/audits/auto-status")

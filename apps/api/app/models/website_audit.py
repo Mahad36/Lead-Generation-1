@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, LargeBinary, String, Text
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, LargeBinary, String, Text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, deferred, mapped_column
 
@@ -36,6 +36,13 @@ class WebsiteAudit(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     send_attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     # False after a permanent send failure (bad address, rejected): never retried automatically
     send_retryable: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    # Platform intelligence (details in site_data["platform_intel"] and report["platform_opportunities"])
+    platform: Mapped[str] = mapped_column(String(64), default="", index=True, nullable=False)
+    platform_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Statuses present among the findings (confirmed_missing / improvement / not_detected / manual_review), for filters
+    finding_types: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
+    # Suggested outreach angle, editable before it is used in an email
+    outreach_angle: Mapped[str] = mapped_column(Text, default="", nullable=False)
     site_data: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
     performance: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
     report: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)

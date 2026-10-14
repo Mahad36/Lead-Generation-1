@@ -39,6 +39,7 @@ def validate_template_variables(subject: str, html_body: str, extra: str = "") -
         "sender_company",
         "sender_website",
         "signature",
+        "outreach_angle",
         "unsubscribe_url",
     }
     used = set(find_variables(subject) + find_variables(html_body) + find_variables(extra))

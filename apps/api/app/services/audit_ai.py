@@ -13,6 +13,9 @@ logger = get_logger("audit_ai")
 SEVERITIES = ["critical", "high", "medium", "low"]
 EFFORTS = ["low", "medium", "high"]
 
+# How sure a finding is (see services/platform_checks.py)
+FINDING_STATUSES = ["confirmed_missing", "improvement", "not_detected", "manual_review"]
+
 AUDIT_SCHEMA: dict = {
     "type": "object",
     "properties": {
@@ -46,8 +49,12 @@ AUDIT_SCHEMA: dict = {
                     "evidence": {"type": "string"},
                     "impact": {"type": "string"},
                     "recommendation": {"type": "string"},
+                    "status": {"type": "string", "enum": FINDING_STATUSES},
+                    "evidence_url": {"type": "string"},
                 },
-                "required": ["title", "category", "where", "severity", "evidence", "impact", "recommendation"],
+                "required": [
+                    "title", "category", "where", "severity", "evidence", "impact", "recommendation", "status", "evidence_url"
+                ],
                 "additionalProperties": False,
             },
         },
@@ -66,6 +73,24 @@ AUDIT_SCHEMA: dict = {
             },
         },
         "conclusion": {"type": "string"},
+        "platform_opportunities": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string"},
+                    "status": {"type": "string", "enum": FINDING_STATUSES},
+                    "severity": {"type": "string", "enum": SEVERITIES},
+                    "evidence": {"type": "string"},
+                    "evidence_url": {"type": "string"},
+                    "recommendation": {"type": "string"},
+                    "business_relevance": {"type": "string"},
+                },
+                "required": ["title", "status", "severity", "evidence", "evidence_url", "recommendation", "business_relevance"],
+                "additionalProperties": False,
+            },
+        },
+        "outreach_angle": {"type": "string"},
         "free_offer": {
             "type": "object",
             "properties": {"offer": {"type": "string"}, "why": {"type": "string"}},
@@ -92,6 +117,8 @@ AUDIT_SCHEMA: dict = {
         "findings",
         "action_plan",
         "conclusion",
+        "platform_opportunities",
+        "outreach_angle",
         "free_offer",
         "reference_sites",
     ],
@@ -163,10 +190,34 @@ Ground rules:
   Care). Copy each url exactly as given. note: one short sentence on why it is relevant (same industry, similar
   products, similar audience). If nothing is close, pick the strongest general example and say so in the note.
   Empty list only if no portfolio is given.
+
+Platform (website_crawl.platform_intel): the detected platform, its confidence, add-on technologies, and feature
+checks, each with a status and evidence (page URL + what was observed). Use them like this:
+- Every finding and platform opportunity has a status:
+  confirmed_missing = a check says so, or you can clearly see it is absent in the screenshots;
+  improvement = it exists but you can see / measure a weakness;
+  not_detected = the audit couldn't verify it (scripts, apps and embeds can be invisible in the page source);
+  manual_review = needs a human to confirm.
+  Never upgrade a check's "not_detected" to "confirmed_missing", and never call something missing that a check
+  marks "present". evidence_url is the page it is about (one of the crawled / checked URLs).
+- platform_opportunities: 2-5 opportunities specific to the detected platform (Shopify, WordPress, WooCommerce,
+  Wix, Squarespace, Webflow, Magento, BigCommerce, PrestaShop...), each grounded in a check or something visible in
+  the screenshots: what you observed, the platform-native way to improve it (its built-in features, apps or
+  plugins), and the possible business benefit, without guarantees (no promised revenue, rankings or conversions).
+  For "not_detected" items, phrase the wording as a question to confirm ("worth checking whether..."), never as a
+  fact. If the platform is Unknown or Custom-built, base them on what was observed only, with no platform-specific
+  claims. Empty list only if nothing is supported by evidence.
+- outreach_angle: 2-3 sentences for a cold email, from the strongest confirmed_missing or improvement item:
+  a specific observation (naming the page or area), the platform-specific opportunity, a possible benefit in
+  cautious wording ("may help", "could make it easier"), and a natural opening for a conversation. Never base it on
+  a not_detected item stated as fact.
 """ + HUMAN_STYLE
 
 EMAIL_SYSTEM = """You write short cold emails that a real person would write, sent with a website audit PDF.
 Rules:
+- When audit.outreach_angle is given, build the opening on it (it is the strongest verified observation,
+  possibly edited by the sender); you may mention the platform (e.g. "your Shopify store"). Never present something
+  the audit only "couldn't detect" as a fact, and never promise results.
 - Greet recipient_business.contact_name by first name when it is given; otherwise greet the business's team by name.
 - Open with one specific thing you noticed on their site (from the audit), not with who you are.
 - Mention 1-2 more findings in terms of this business (its name, services or location), so the email could not be
@@ -239,6 +290,8 @@ def normalize_report(data: dict) -> dict:
                 "evidence": _text(item.get("evidence"), 600),
                 "impact": _text(item.get("impact"), 600),
                 "recommendation": _text(item.get("recommendation"), 800),
+                "status": status if (status := _text(item.get("status")).lower()) in FINDING_STATUSES else "improvement",
+                "evidence_url": _text(item.get("evidence_url"), 500),
             }
         )
     findings.sort(key=lambda f: SEVERITIES.index(f["severity"]))
@@ -274,6 +327,24 @@ def normalize_report(data: dict) -> dict:
             }
         )
 
+    opportunities = []
+    for item in data.get("platform_opportunities") or []:
+        if not isinstance(item, dict) or not _text(item.get("title")):
+            continue
+        status = _text(item.get("status")).lower()
+        severity = _text(item.get("severity")).lower()
+        opportunities.append(
+            {
+                "title": _text(item.get("title"), 200),
+                "status": status if status in FINDING_STATUSES else "manual_review",
+                "severity": severity if severity in SEVERITIES else "medium",
+                "evidence": _text(item.get("evidence"), 600),
+                "evidence_url": _text(item.get("evidence_url"), 500),
+                "recommendation": _text(item.get("recommendation"), 800),
+                "business_relevance": _text(item.get("business_relevance"), 500),
+            }
+        )
+
     report = {
         "overall_score": _clamp_score(data.get("overall_score")),
         "headline": _text(data.get("headline"), 200),
@@ -284,6 +355,8 @@ def normalize_report(data: dict) -> dict:
         "findings": findings,
         "action_plan": plan,
         "conclusion": _text(data.get("conclusion"), 1500),
+        "platform_opportunities": opportunities[:6],
+        "outreach_angle": _text(data.get("outreach_angle"), 800),
         "free_offer": {
             "offer": _text((data.get("free_offer") or {}).get("offer"), 400),
             "why": _text((data.get("free_offer") or {}).get("why"), 600),
@@ -355,6 +428,12 @@ def generate_audit_email(
         "top_findings": report.get("findings", [])[:4],
         "first_actions": report.get("action_plan", [])[:3],
         "free_offer": report.get("free_offer") or {},
+        "platform": report.get("platform") or "",
+        # The suggested opening (you may have edited it) and platform opportunities that have evidence
+        "outreach_angle": report.get("outreach_angle") or "",
+        "platform_opportunities": [
+            o for o in report.get("platform_opportunities") or [] if o.get("status") in ("confirmed_missing", "improvement")
+        ][:2],
         "reference_site": (report.get("reference_sites") or [None])[0],
     }
     prompt = (
@@ -385,3 +464,47 @@ def generate_audit_email(
     if not subject:
         subject = f"Website audit for {lead.get('business_name') or 'your website'}"
     return {"subject": subject, "html": body}
+
+
+PLATFORM_ADDENDUM_SCHEMA: dict = {
+    "type": "object",
+    "properties": {
+        "platform_opportunities": AUDIT_SCHEMA["properties"]["platform_opportunities"],
+        "outreach_angle": {"type": "string"},
+    },
+    "required": ["platform_opportunities", "outreach_angle"],
+    "additionalProperties": False,
+}
+
+
+def generate_platform_addendum(
+    provider: AIProvider, *, lead: dict, report: dict, platform_intel: dict, timeout: float
+) -> dict:
+    """For an older audit: platform opportunities and an outreach angle from its existing findings + the new checks."""
+    payload = {
+        "business": lead,
+        "existing_findings": [
+            {k: f.get(k) for k in ("title", "where", "severity", "evidence", "recommendation")} for f in report.get("findings") or []
+        ][:9],
+        "website_crawl": {"platform_intel": platform_intel},
+    }
+    instructions = AUDIT_SYSTEM.split("Platform (website_crawl.platform_intel)", 1)[1]
+    text = provider.generate(
+        "Add the platform section to this existing website audit. Return JSON only with platform_opportunities and "
+        "outreach_angle.\n\n" + json.dumps(payload, default=str, ensure_ascii=False),
+        system="You are a senior website / CRO consultant.\nPlatform (website_crawl.platform_intel)" + instructions,
+        temperature=0.2,
+        max_tokens=4000,
+        json_schema=PLATFORM_ADDENDUM_SCHEMA,
+        timeout=timeout,
+    )
+    data = parse_json_text(text)
+    normalized = normalize_report(
+        {
+            "executive_summary": "x",
+            "findings": [{"title": "x", "severity": "low"}],
+            "platform_opportunities": data.get("platform_opportunities") or [],
+            "outreach_angle": data.get("outreach_angle") or "",
+        }
+    )
+    return {"platform_opportunities": normalized["platform_opportunities"], "outreach_angle": normalized["outreach_angle"]}

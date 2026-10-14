@@ -128,17 +128,47 @@ def get_audit(db: Session, user_id: str, audit_id: str) -> WebsiteAudit:
 
 
 def list_audits(
-    db: Session, user_id: str, lead_id: str | None = None, limit: int = 50, q: str | None = None, offset: int = 0
+    db: Session,
+    user_id: str,
+    lead_id: str | None = None,
+    limit: int = 50,
+    q: str | None = None,
+    offset: int = 0,
+    platform: str | None = None,
+    finding_type: str | None = None,
 ) -> list[WebsiteAudit]:
-    return _audits_query(db, user_id, lead_id, q).order_by(WebsiteAudit.created_at.desc()).offset(offset).limit(limit).all()
+    query = _audits_query(db, user_id, lead_id, q, platform, finding_type)
+    return query.order_by(WebsiteAudit.created_at.desc()).offset(offset).limit(limit).all()
 
 
-def count_audits(db: Session, user_id: str, lead_id: str | None = None, q: str | None = None) -> int:
-    return _audits_query(db, user_id, lead_id, q).count()
+def count_audits(
+    db: Session, user_id: str, lead_id: str | None = None, q: str | None = None, platform: str | None = None,
+    finding_type: str | None = None,
+) -> int:
+    return _audits_query(db, user_id, lead_id, q, platform, finding_type).count()
 
 
-def _audits_query(db: Session, user_id: str, lead_id: str | None, q: str | None):
+def audit_platforms(db: Session, user_id: str) -> list[dict]:
+    """Platforms among your audits, with counts (for the filter)."""
+    from sqlalchemy import func as sql_func
+
+    rows = (
+        db.query(WebsiteAudit.platform, sql_func.count(WebsiteAudit.id))
+        .filter(WebsiteAudit.user_id == user_id)
+        .group_by(WebsiteAudit.platform)
+        .all()
+    )
+    return sorted(({"platform": p or "Unknown", "count": n} for p, n in rows), key=lambda r: -r["count"])
+
+
+def _audits_query(
+    db: Session, user_id: str, lead_id: str | None, q: str | None, platform: str | None = None, finding_type: str | None = None
+):
     query = db.query(WebsiteAudit).filter(WebsiteAudit.user_id == user_id)
+    if platform:
+        query = query.filter(WebsiteAudit.platform.in_(["", "Unknown", "Other"]) if platform == "Unknown" else WebsiteAudit.platform == platform)
+    if finding_type:
+        query = query.filter(WebsiteAudit.finding_types.contains([finding_type]))
     if lead_id:
         query = query.filter(WebsiteAudit.lead_id == lead_id)
     if q and q.strip():
@@ -272,7 +302,11 @@ def serialize_audit(audit: WebsiteAudit, *, full: bool = True) -> dict:
         "website_url": audit.website_url,
         "recipient_email": audit.recipient_email,
         "email_account_id": audit.email_account_id,  # sends from this account (none: the default account)
-        "platform": (audit.site_data or {}).get("platform") or "",  # Shopify, WordPress, Wix... (detected)
+        "platform": audit.platform or (audit.site_data or {}).get("platform") or "",  # Shopify, WordPress...
+        "platform_confidence": audit.platform_confidence,
+        "platform_confidence_label": ((audit.site_data or {}).get("platform_intel") or {}).get("confidence_label", ""),
+        "finding_types": audit.finding_types or [],
+        "outreach_angle": audit.outreach_angle or (audit.report or {}).get("outreach_angle", ""),
         "auto_send": audit.auto_send,
         "trigger": audit.trigger,
         "overall_score": audit.overall_score,
@@ -294,6 +328,7 @@ def serialize_audit(audit: WebsiteAudit, *, full: bool = True) -> dict:
         data.update(
             {
                 "report": audit.report or {},
+                "platform_intel": (audit.site_data or {}).get("platform_intel") or {},
                 "resources": {
                     key: (perf.get("resources") or {}).get(key)
                     for key in ("total_requests", "total_bytes", "by_type", "third_party_requests")
@@ -429,7 +464,70 @@ def _collect_site_data(lead: Lead, url: str) -> dict:
         "rule_based_scores": analysis.get("category_scores", {}),
         "rule_based_website_score": analysis.get("website_score"),
         "text_excerpt": text[:3000],
+        "platform_intel": platform_intelligence(
+            url, [(p.url, p.html) for p in crawl.pages if p.html], detection, homepage.status_code if homepage else None
+        ),
     }
+
+
+def platform_intelligence(url: str, pages: list[tuple[str, str]], detection, home_status: int | None = None) -> dict:
+    """Detected platform (with confidence, add-ons and evidence) and the evidence-based feature checks.
+    Never fails the audit: a problem is recorded and the audit carries on."""
+    from app.services.platform_checks import run_platform_checks
+    from app.services.platform_detection import platform_summary
+
+    intel = platform_summary(detection, datetime.now(UTC).isoformat())
+    try:
+        intel.update(run_platform_checks(url, pages, detection, home_status))
+        if intel.get("unreadable"):
+            # A block / error page says nothing about the platform either
+            intel.update({"primary": "Unknown", "confidence": 0.0, "confidence_label": "Unknown"})
+    except Exception as exc:
+        logger.warning("platform_intel_failed", url=url, error=str(exc)[:200])
+        intel.update({"checks": [], "counts": {}, "error": str(exc)[:200]})
+    return intel
+
+
+def _report_for_email(audit: WebsiteAudit, report: dict) -> dict:
+    """The report plus the platform and your (possibly edited) outreach angle, for writing the email."""
+    return {**report, "platform": audit.platform, "outreach_angle": audit.outreach_angle or report.get("outreach_angle", "")}
+
+
+def set_outreach_angle(db: Session, user_id: str, audit_id: str, text: str) -> WebsiteAudit:
+    audit = get_audit(db, user_id, audit_id)
+    audit.outreach_angle = (text or "").strip()[:1500]
+    db.commit()
+    db.refresh(audit)
+    return audit
+
+
+def apply_platform_results(audit: WebsiteAudit, lead: Lead | None, report: dict) -> None:
+    """Keep the report honest against the checks, then store platform, finding types and the outreach angle."""
+    intel = (audit.site_data or {}).get("platform_intel") or {}
+    checks = intel.get("checks") or []
+    known_urls = {e.get("url", "").rstrip("/") for c in checks for e in c.get("evidence") or []}
+    known_urls |= {(p.get("url") or "").rstrip("/") for p in (audit.site_data or {}).get("pages_crawled") or []}
+    known_urls.add((audit.website_url or "").rstrip("/"))
+    present = {c["feature"].lower() for c in checks if c.get("status") == "present"}
+    for item in [*report.get("findings", []), *report.get("platform_opportunities", [])]:
+        # "Missing" needs evidence from a page the audit actually looked at; otherwise a human should confirm
+        if item.get("status") == "confirmed_missing":
+            url = (item.get("evidence_url") or "").rstrip("/")
+            if url and url not in known_urls and not item.get("where"):
+                item["status"] = "manual_review"
+            if any(p in (item.get("title") or "").lower() for p in present if len(p) > 6):
+                item["status"] = "manual_review"  # a check saw it present: don't call it missing
+    types = sorted(
+        {i.get("status") for i in [*report.get("findings", []), *report.get("platform_opportunities", [])] if i.get("status")}
+        | {c["status"] for c in checks if c.get("status") != "present"}
+    )
+    audit.platform = (intel.get("primary") or (audit.site_data or {}).get("platform") or "")[:64]
+    audit.platform_confidence = intel.get("confidence")
+    audit.finding_types = types
+    if not audit.outreach_angle:
+        audit.outreach_angle = report.get("outreach_angle") or ""
+    if lead is not None and audit.platform and audit.platform != "Unknown":
+        lead.platform = audit.platform[:64]  # lead lists and filters show it too
 
 
 AUDIT_FILES_KEEP_DAYS = 30
@@ -552,6 +650,7 @@ def run_audit(db: Session, audit_id: str) -> str:
             portfolio=portfolio_sites,
         )
         report["reference_sites"] = keep_known(report.get("reference_sites") or [], portfolio_sites)
+        apply_platform_results(audit, lead, report)
         audit.report = report
         audit.overall_score = report.get("overall_score")
         db.commit()
@@ -567,7 +666,7 @@ def run_audit(db: Session, audit_id: str) -> str:
         email = generate_audit_email(
             provider,
             lead=lead_info,
-            report=report,
+            report=_report_for_email(audit, report),
             sender=sender,
             timeout=settings.audit_ai_timeout_seconds,
         )
@@ -730,7 +829,7 @@ def redraft_email(db: Session, audit_id: str) -> str:
         email = generate_audit_email(
             get_ai_provider_for_user(db, audit.user_id),
             lead=_lead_info(lead) | {"website_url": audit.website_url},
-            report=audit.report or {},
+            report=_report_for_email(audit, audit.report or {}),
             sender=sender,
             timeout=get_settings().audit_ai_timeout_seconds,
         )

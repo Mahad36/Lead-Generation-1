@@ -104,6 +104,20 @@ def text_context(context: dict, db: Session, user_id: str) -> dict:
     return dict(context)
 
 
+def _latest_angle(db: Session, lead: Lead | None) -> str:
+    from app.models import WebsiteAudit
+
+    if not lead:
+        return "While reviewing your website, I noticed a couple of quick wins on the homepage."
+    audit = (
+        db.query(WebsiteAudit)
+        .filter(WebsiteAudit.lead_id == lead.id, WebsiteAudit.outreach_angle != "")
+        .order_by(WebsiteAudit.created_at.desc())
+        .first()
+    )
+    return audit.outreach_angle if audit else ""
+
+
 def build_template_context(db: Session, user_id: str, lead: Lead | None) -> dict:
     settings = db.query(UserSettings).filter(UserSettings.user_id == user_id).first()
     analysis = None
@@ -137,6 +151,8 @@ def build_template_context(db: Session, user_id: str, lead: Lead | None) -> dict
         "sender_website": settings.company_website if settings else "",
         # The sending Gmail's own signature is added when the email is sent; {{signature}} in old templates is empty
         "signature": "",
+        # From the lead's latest website audit: the suggested (possibly edited) opening line
+        "outreach_angle": _latest_angle(db, lead),
         "unsubscribe_url": "{{unsubscribe_url}}",
     }
 

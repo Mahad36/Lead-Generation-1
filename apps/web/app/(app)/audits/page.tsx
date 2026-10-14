@@ -31,16 +31,26 @@ export default function WebsiteAuditsPage() {
   const [search, setSearch] = useState(""); // what was last sent to the API (typing is debounced)
   const [page, setPage] = useState(1);
   const [total, setTotal] = useState(0);
+  const [platform, setPlatform] = useState("");
+  const [findingType, setFindingType] = useState("");
+  const [platforms, setPlatforms] = useState<{ platform: string; count: number }[]>([]);
   const loadList = useCallback(
     () =>
       api<{ items: Audit[]; total: number }>(
-        `/api/audits?page=${page}&page_size=${PAGE_SIZE}${search ? `&q=${encodeURIComponent(search)}` : ""}`
+        `/api/audits?page=${page}&page_size=${PAGE_SIZE}${search ? `&q=${encodeURIComponent(search)}` : ""}` +
+          `${platform ? `&platform=${encodeURIComponent(platform)}` : ""}${findingType ? `&finding_type=${findingType}` : ""}`
       ).then((data) => {
         setAudits(data.items);
         setTotal(data.total);
       }),
-    [search, page]
+    [search, page, platform, findingType]
   );
+
+  useEffect(() => {
+    api<{ platform: string; count: number }[]>("/api/audits/platforms")
+      .then(setPlatforms)
+      .catch(() => setPlatforms([]));
+  }, []);
   const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
   useEffect(() => {
@@ -148,8 +158,42 @@ export default function WebsiteAuditsPage() {
       {selected ? <AuditPanel key={selected.leadId} leadId={selected.leadId} defaultEmail={selected.email} onChange={() => loadList().catch(() => undefined)} /> : null}
 
       <Card>
+        <OlderAuditsUpdate onDone={() => loadList().catch(() => undefined)} />
         <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
-          <h2 className="font-medium">Recent audits</h2>
+          <div className="flex flex-wrap items-center gap-2">
+            <h2 className="font-medium">Recent audits</h2>
+            <select
+              className="rounded-md border border-border bg-card px-2 py-1 text-sm"
+              value={platform}
+              aria-label="Filter by platform"
+              onChange={(e) => {
+                setPlatform(e.target.value);
+                setPage(1);
+              }}
+            >
+              <option value="">All platforms</option>
+              {platforms.map((p) => (
+                <option key={p.platform} value={p.platform}>
+                  {platformLabel(p.platform) === "—" ? "Unknown" : p.platform} ({p.count})
+                </option>
+              ))}
+            </select>
+            <select
+              className="rounded-md border border-border bg-card px-2 py-1 text-sm"
+              value={findingType}
+              aria-label="Filter by finding type"
+              onChange={(e) => {
+                setFindingType(e.target.value);
+                setPage(1);
+              }}
+            >
+              <option value="">All findings</option>
+              <option value="confirmed_missing">Has confirmed-missing items</option>
+              <option value="improvement">Has improvement opportunities</option>
+              <option value="not_detected">Has not-detected items</option>
+              <option value="manual_review">Needs manual review</option>
+            </select>
+          </div>
           <div className="relative w-full sm:w-80">
             <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
             <Input
@@ -229,13 +273,74 @@ export default function WebsiteAuditsPage() {
             </div>
           </div>
         ) : (
-          search ? (
-            <Empty title={`No audits match "${search}"`} hint="Try part of the website address or the email." />
+          search || platform || findingType ? (
+            <Empty title="No audits match these filters" hint="Try another platform, finding type or search." />
           ) : (
             <Empty title="No audits yet" hint="Run your first audit with the form above." />
           )
         )}
       </Card>
+    </div>
+  );
+}
+
+type ReprocessStatus = {
+  running: boolean;
+  done?: number;
+  failed?: number;
+  total?: number;
+  current?: string;
+  older_audits_without_platform: number;
+};
+
+/** Add platform details to audits made before platform checks, a batch at a time in the background. */
+function OlderAuditsUpdate({ onDone }: { onDone: () => void }) {
+  const [state, setState] = useState<ReprocessStatus | null>(null);
+
+  const refresh = useCallback(
+    () =>
+      api<ReprocessStatus>("/api/audits/reprocess-platform")
+        .then((s) => {
+          setState((prev) => {
+            if (prev?.running && !s.running) onDone();
+            return s;
+          });
+        })
+        .catch(() => undefined),
+    [onDone]
+  );
+
+  useEffect(() => {
+    refresh();
+  }, [refresh]);
+
+  useEffect(() => {
+    if (!state?.running) return;
+    const timer = setInterval(refresh, 5000);
+    return () => clearInterval(timer);
+  }, [state?.running, refresh]);
+
+  if (!state || (!state.running && !state.older_audits_without_platform)) return null;
+  async function start() {
+    try {
+      setState(await api<ReprocessStatus>("/api/audits/reprocess-platform", { method: "POST", body: JSON.stringify({ limit: 25, with_ai: true }) }));
+      toast.success("Updating older audits in the background");
+    } catch (e) {
+      toast.error((e as Error).message);
+    }
+  }
+  return (
+    <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border p-3 text-sm">
+      <span>
+        {state.running
+          ? `Adding platform details: ${state.done || 0} of ${state.total || 0} done${state.failed ? `, ${state.failed} failed` : ""}${state.current ? ` (now: ${state.current.replace(/^https?:\/\/(www\.)?/, "")})` : ""}`
+          : `${state.older_audits_without_platform} older audits have no platform details yet. Existing findings are kept; each site is re-checked gently, one at a time.`}
+      </span>
+      {!state.running ? (
+        <Button variant="secondary" onClick={start}>
+          Update older audits (25 at a time)
+        </Button>
+      ) : null}
     </div>
   );
 }

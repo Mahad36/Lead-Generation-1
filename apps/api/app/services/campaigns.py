@@ -544,6 +544,9 @@ def generate_for_campaign_lead(db: Session, campaign_lead_id: str) -> CampaignLe
             "services": a.services,
             "business_summary": a.business_summary,
         }
+    if context.get("outreach_angle"):
+        # The audit's verified observation (platform-specific), for the AI paragraph to build on
+        analysis = {**analysis, "outreach_angle": context["outreach_angle"], "platform": lead.platform}
     try:
         personalized = generate_personalized_email(
             db,
@@ -567,7 +570,7 @@ def generate_for_campaign_lead(db: Session, campaign_lead_id: str) -> CampaignLe
                 else [],
             },
         )
-        context["personalized_message"] = personalized
+        context["personalized_message"] = personalized  # (outreach_angle is in context too, from the audit)
         cl.personalized_message = personalized
         cl.html_body = render_template(template.html_body, {**context, "personalized_message": personalized})
         if "{{personalized_message}}" not in template.html_body:

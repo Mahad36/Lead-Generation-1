@@ -1,5 +1,6 @@
 "use client";
 
+import { PlatformInsights, StatusBadge, type PlatformIntel, type PlatformOpportunity } from "@/components/platform-insights";
 import { SendFrom } from "@/components/send-from";
 import { TrackingBadges, type Tracking } from "@/components/tracking-badges";
 import { Badge, Button, Card, Input, Label, Textarea } from "@/components/ui";
@@ -9,7 +10,15 @@ import { CheckCircle2, Circle, Download, FileText, Loader2, Mail, RefreshCw, Sen
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
-type Finding = { title: string; severity: string; evidence: string; recommendation: string; where?: string };
+type Finding = {
+  title: string;
+  severity: string;
+  evidence: string;
+  recommendation: string;
+  where?: string;
+  status?: string; // confirmed_missing | improvement | not_detected | manual_review
+  evidence_url?: string;
+};
 
 export type Audit = Tracking & {
   id: string;
@@ -22,6 +31,10 @@ export type Audit = Tracking & {
   recipient_email: string;
   email_account_id: string | null;
   platform?: string; // detected: Shopify, WordPress, Wix...
+  platform_confidence_label?: string;
+  finding_types?: string[];
+  outreach_angle?: string;
+  platform_intel?: PlatformIntel;
   auto_send: boolean;
   overall_score: number | null;
   headline: string;
@@ -34,7 +47,13 @@ export type Audit = Tracking & {
   created_at: string;
   generated_at: string | null;
   sent_at: string | null;
-  report?: { executive_summary?: string; first_impression?: string; findings?: Finding[] };
+  report?: {
+    executive_summary?: string;
+    first_impression?: string;
+    findings?: Finding[];
+    platform_opportunities?: PlatformOpportunity[];
+    outreach_angle?: string;
+  };
   resources?: {
     total_requests?: number;
     total_bytes?: number;
@@ -418,6 +437,7 @@ export function AuditPanel({
                   {findings.slice(0, 5).map((f) => (
                     <li key={f.title} className="flex gap-2">
                       <Badge tone={f.severity === "low" ? "default" : f.severity === "medium" ? "warn" : "bad"}>{f.severity}</Badge>
+                      <StatusBadge status={f.status} />
                       <span>
                         <b>{f.title}</b>
                         {f.where ? <span className="text-muted"> ({f.where})</span> : null} — {f.evidence}
@@ -426,6 +446,16 @@ export function AuditPanel({
                   ))}
                 </ul>
               ) : null}
+
+              <PlatformInsights
+                key={`${audit.id}:${audit.outreach_angle || ""}`}
+                auditId={audit.id}
+                platform={audit.platform}
+                intel={audit.platform_intel}
+                opportunities={audit.report?.platform_opportunities}
+                angle={audit.outreach_angle}
+                onSaved={() => loadAudit(audit.id).catch(() => undefined)}
+              />
 
               <div className="space-y-3 rounded-lg border border-border p-3">
                 <div className="flex items-center justify-between">
