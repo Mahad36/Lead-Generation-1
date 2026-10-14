@@ -229,6 +229,17 @@ function AccountsInner() {
               <Button variant="danger" onClick={() => api(`/api/email-accounts/${a.id}/disconnect`, { method: "POST" }).then(() => { toast.success("Disconnected"); load(); })}>
                 Disconnect
               </Button>
+              <Button
+                variant="danger"
+                onClick={() => {
+                  if (!window.confirm(`Delete ${a.email_address} completely? Emails already sent and replies stay in your records. This can't be undone (you can add the Gmail again later).`)) return;
+                  api(`/api/email-accounts/${a.id}`, { method: "DELETE" })
+                    .then(() => { toast.success(`${a.email_address} deleted`); load(); })
+                    .catch((e) => toast.error(e.message));
+                }}
+              >
+                Delete
+              </Button>
             </div>
           </div>
           {a.status === "connected" ? (

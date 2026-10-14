@@ -146,6 +146,47 @@ def gmail_callback(
     return RedirectResponse(f"{settings.frontend_url}/email-accounts?connected={account.id}")
 
 
+@router.delete("/{account_id}")
+def delete_account(
+    account_id: str,
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Remove the account completely. Sent emails, replies and campaigns stay (their sender link is cleared);
+    files / campaigns that sent from it fall back to your default account."""
+    account = (
+        db.query(EmailAccount)
+        .filter(EmailAccount.id == account_id, EmailAccount.user_id == user.id)
+        .first()
+    )
+    if not account:
+        raise HTTPException(status_code=404, detail="Account not found")
+    address, was_default = account.email_address, account.is_default
+    write_audit(
+        db,
+        user_id=user.id,
+        action="gmail.deleted",
+        entity_type="email_account",
+        entity_id=account.id,
+        details={"email_address": address},
+        **get_client_meta(request),
+    )
+    db.query(EmailAccount).filter(EmailAccount.id == account_id).delete(synchronize_session=False)
+    db.flush()
+    if was_default:
+        replacement = (
+            db.query(EmailAccount)
+            .filter(EmailAccount.user_id == user.id, EmailAccount.status != "disconnected")
+            .order_by(EmailAccount.created_at)
+            .first()
+        )
+        if replacement:
+            replacement.is_default = True
+    db.commit()
+    return {"message": f"Deleted {address}"}
+
+
 @router.post("/{account_id}/disconnect")
 def disconnect(
     account_id: str,
@@ -363,6 +404,23 @@ def placement_test(account_id: str, user: User = Depends(get_current_user), db: 
     return start_placement_test(db, account)
 
 
+def _test_message(account: EmailAccount) -> tuple[str, str, str]:
+    from html import escape
+
+    name = (account.display_name or "").strip() or account.email_address.split("@")[0]
+    when = datetime.now().strftime("%A %d %B, %H:%M")
+    lines = [
+        "Hi,",
+        f"Just checking that email from {account.email_address} arrives properly. It was sent on {when}.",
+        "If this landed in Spam, please open it and click \"Report not spam\" (or move it to the Inbox), and reply"
+        " with a quick \"got it\" - both tell Gmail this address is a real person you talk to.",
+        f"Thanks,\n{name}",
+    ]
+    text = "\n\n".join(lines)
+    html = "".join(f"<p>{escape(line).replace(chr(10), '<br>')}</p>" for line in lines)
+    return f"Checking my new email address ({datetime.now():%d %b})", text, html
+
+
 @router.post("/{account_id}/test")
 def test_email(
     account_id: str,
@@ -379,11 +437,11 @@ def test_email(
     if not account:
         raise HTTPException(status_code=404, detail="Account not found")
     recipient = to or user.email
-    html = "<p>This is a test email from Lead Generator.</p>"
+    # A short, ordinary personal note (plain text and HTML say the same thing): "test email" wording, one-line
+    # bodies and mismatched text/HTML parts are what spam filters look for.
+    subject, text, html = _test_message(account)
     try:
-        provider_id = send_gmail_message(
-            db, account, to=recipient, subject="Lead Generator test email", html_body=html, text_body="Test email"
-        )
+        provider_id = send_gmail_message(db, account, to=recipient, subject=subject, html_body=html, text_body=text)
     except GmailSendError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     db.add(
@@ -392,9 +450,9 @@ def test_email(
             email_account_id=account.id,
             recipient_email=recipient,
             recipient_name=user.full_name,
-            subject="Lead Generator test email",
+            subject=subject,
             html_body=html,
-            text_body="Test email",
+            text_body=text,
             status="sent",
             provider_message_id=provider_id,
             sent_at=datetime.now(UTC),

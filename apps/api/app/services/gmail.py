@@ -245,10 +245,20 @@ def _build_message(
             message.attach(part)
     else:
         message = body
+    from email.utils import formatdate, make_msgid, parseaddr
+
     message["to"] = to
     message["from"] = sender
     message["subject"] = subject
-    for name, value in (headers or {}).items():
+    headers = dict(headers or {})
+    # Every message carries a Date and a Message-ID from the sender's own domain: mail without them is a classic
+    # spam-filter signal (SpamAssassin MISSING_DATE / MISSING_MID).
+    if not any(k.lower() == "date" for k in headers):
+        message["Date"] = formatdate(localtime=True)
+    if not any(k.lower() == "message-id" for k in headers):
+        domain = parseaddr(sender)[1].rpartition("@")[2] or None
+        message["Message-ID"] = make_msgid(domain=domain)
+    for name, value in headers.items():
         message[name] = value
     return message
 
