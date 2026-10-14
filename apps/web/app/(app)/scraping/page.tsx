@@ -18,7 +18,7 @@ import { OutreachTable, type OutreachLead } from "@/components/outreach";
 import { Badge, Button, Card, Input, Label } from "@/components/ui";
 import { api } from "@/lib/api";
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 type LeadRow = OutreachLead & {
@@ -86,6 +86,8 @@ export default function ScrapingPage() {
   const [job, setJob] = useState<Job | null>(null);
   const [jobs, setJobs] = useState<Job[]>([]);
   const [leads, setLeads] = useState<LeadRow[]>([]);
+  const [leadOrder, setLeadOrder] = useState<"asc" | "desc">("asc"); // asc: first scraped at the top
+  const leadOrderRef = useRef<"asc" | "desc">("asc"); // read by the live refresh
   const [dailyLimit, setDailyLimit] = useState(50);
   const [outreachMode, setOutreachMode] = useState<OutreachMode>("auto");
   const [outreachLimit, setOutreachLimit] = useState(0); // audits per day; 0 = no limit
@@ -93,11 +95,17 @@ export default function ScrapingPage() {
   const [followups, setFollowups] = useState(true);
   const [source, setSource] = useState<{ provider: string; apifyReady: boolean } | null>(null);
 
-  async function loadLeads(jobId: string) {
-    const res = await api<{ items: LeadRow[] }>(
-      `/api/leads?scraping_job_id=${jobId}&page=1&page_size=100&sort=created_at&order=desc`
-    );
-    setLeads(res.items || []);
+  // Every lead of the file (in pages of 200), first scraped at the top unless you pick newest first
+  async function loadLeads(jobId: string, order: "asc" | "desc" = leadOrderRef.current) {
+    const all: LeadRow[] = [];
+    for (let page = 1; page <= 25; page++) {
+      const res = await api<{ items: LeadRow[]; total: number }>(
+        `/api/leads?scraping_job_id=${jobId}&page=${page}&page_size=200&sort=created_at&order=${order}`
+      );
+      all.push(...(res.items || []));
+      if (!res.items?.length || all.length >= (res.total || 0)) break;
+    }
+    setLeads(all);
   }
 
   async function refresh(id?: string) {
@@ -467,7 +475,30 @@ export default function ScrapingPage() {
                 : "No leads were saved in this file."}
             </p>
           ) : (
+            <>
+            <div className="flex flex-wrap items-center justify-between gap-2 text-sm">
+              <span className="text-muted">
+                {leads.length} lead{leads.length === 1 ? "" : "s"} in this file · scroll inside the list
+              </span>
+              <label className="flex items-center gap-2">
+                Order
+                <select
+                  className="rounded-md border border-border bg-card px-2 py-1 text-sm"
+                  value={leadOrder}
+                  onChange={(e) => {
+                    const next = e.target.value as "asc" | "desc";
+                    setLeadOrder(next);
+                    leadOrderRef.current = next;
+                    loadLeads(job.id, next).catch(() => undefined);
+                  }}
+                >
+                  <option value="asc">First scraped first</option>
+                  <option value="desc">Newest first</option>
+                </select>
+              </label>
+            </div>
             <OutreachTable
+              scroll
               leads={leads}
               actions={(lead) =>
                 (lead as LeadRow).status === "processing" ? (
@@ -477,6 +508,7 @@ export default function ScrapingPage() {
                 ) : null
               }
             />
+            </>
           )}
         </div>
       ) : null}

@@ -135,11 +135,19 @@ function EmailCell({ o }: { o?: Outreach | null }) {
 }
 
 /** Leads with their audit / PDF / email / tracking status. */
-export function OutreachTable({ leads, actions }: { leads: OutreachLead[]; actions?: (lead: OutreachLead) => ReactNode }) {
+export function OutreachTable({
+  leads,
+  actions,
+  scroll = false,
+}: {
+  leads: OutreachLead[];
+  actions?: (lead: OutreachLead) => ReactNode;
+  scroll?: boolean; // a scroll box (header stays visible) instead of growing the page
+}) {
   return (
-    <div className="overflow-x-auto rounded-xl border border-border bg-card">
+    <div className={`overflow-x-auto rounded-xl border border-border bg-card ${scroll ? "max-h-[70vh] overflow-y-auto" : ""}`}>
       <table className="min-w-full text-left text-sm">
-        <thead className="text-xs uppercase text-muted">
+        <thead className={`text-xs uppercase text-muted ${scroll ? "sticky top-0 z-10 bg-card shadow-sm" : ""}`}>
           <tr>
             {["Company", "Email", "Website", "Workflow", "Score", "PDF", "Email status", "Sent from", ""].map((h) => (
               <th key={h} className="whitespace-nowrap px-3 py-2">
