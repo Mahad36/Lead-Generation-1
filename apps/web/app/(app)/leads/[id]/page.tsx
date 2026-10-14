@@ -1,6 +1,7 @@
 "use client";
 
 import { AuditPanel } from "@/components/audit-panel";
+import { LeadContacts } from "@/components/lead-contacts";
 import { LeadConversations, LeadFollowups } from "@/components/conversation";
 import { OutreachStepper } from "@/components/outreach";
 import { Badge, Button, Card, Input } from "@/components/ui";
@@ -158,6 +159,7 @@ export default function LeadDetailPage() {
           )}
         </Card>
       </div>
+      <LeadContacts leadId={id} onChange={() => load().catch(() => undefined)} />
       <AuditPanel
         leadId={id}
         defaultEmail={lead.primary_email}

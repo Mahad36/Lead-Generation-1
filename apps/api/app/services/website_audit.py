@@ -49,6 +49,7 @@ from app.services.screenshots import ScreenshotError, capture_screenshots
 from app.services.platform_detection import detect_platform
 from app.services.suppression import is_suppressed
 from app.utils.normalize import normalize_email, normalize_url
+from app.services.contacts import company_already_contacted, recipient_options, select_recipients
 from app.services.gmail_signature import account_signature
 from app.utils.signature import append_signature, drop_ai_sign_off, ensure_sign_off
 
@@ -508,6 +509,7 @@ def run_audit(db: Session, audit_id: str) -> str:
         site = _collect_site_data(lead, audit.website_url)
         audit.site_data = site
         db.commit()
+        _discover_contacts(db, audit, lead, log)
 
         current = "measuring"
         _set_step(db, audit, "measuring")
@@ -781,6 +783,38 @@ def _html_to_text(html: str) -> str:
     return text
 
 
+def _origin_extra(db: Session, audit: WebsiteAudit) -> dict:
+    """extra of the campaign / scrape file this audit belongs to (its recipient options live there)."""
+    campaign = _audit_campaign(db, audit)
+    if campaign:
+        return campaign.extra or {}
+    if audit.trigger == "auto":
+        from app.models import ScrapingJob
+
+        lead = db.get(Lead, audit.lead_id)
+        job = db.get(ScrapingJob, lead.scraping_job_id) if lead and lead.scraping_job_id else None
+        return (job.extra or {}) if job else {}
+    return {}
+
+
+def _discover_contacts(db: Session, audit: WebsiteAudit, lead: Lead, log) -> None:
+    """Find the business's other contacts (team / about / contact / imprint pages) and pick the best primary
+    recipient. The audit's recipient follows the new choice unless you typed a different address yourself."""
+    from app.services.contacts import discover
+
+    before = (lead.primary_email or "").lower()
+    try:
+        discover(db, lead)
+    except Exception as exc:  # discovery must never fail an audit
+        db.rollback()
+        log.warning("contact_discovery_failed", error=str(exc)[:200])
+        return
+    db.refresh(lead)
+    if (audit.recipient_email or "").lower() in ("", before) and lead.primary_email:
+        audit.recipient_email = lead.primary_email
+        db.commit()
+
+
 def _audit_campaign(db: Session, audit: WebsiteAudit):
     if audit.trigger != "campaign":
         return None
@@ -869,6 +903,28 @@ def send_audit(
     recipient = _valid_email(
         recipient_email if recipient_email is not None else (audit.recipient_email or (lead.primary_email if lead else ""))
     )
+    # Who receives it: the best contact at this business (and CC'd colleagues when the campaign / file allows),
+    # unless you typed a different address yourself
+    options = recipient_options(_origin_extra(db, audit))
+    cc: list[str] = []
+    if lead and lead.emails and recipient_email is None:
+        choice = select_recipients(
+            db, lead, include_generic=options["include_generic"], cc_enabled=options["cc_enabled"], cc_max=options["cc_max"]
+        )
+        typed_by_you = audit.recipient_email and audit.recipient_email.lower() not in {e.email.lower() for e in lead.emails}
+        if not typed_by_you:
+            recipient = _valid_email(choice["to"]) or ("" if not options["include_generic"] else recipient)
+        cc = [c for c in choice["cc"] if c != (recipient or "").lower()]
+    if lead and not manual:
+        # One campaign message per company: never a second copy through another address of the same business
+        campaign_for_dedup = _audit_campaign(db, audit)
+        skip_previous = campaign_for_dedup.skip_previously_contacted if campaign_for_dedup else True
+        already = company_already_contacted(db, lead, campaign_for_dedup.id if campaign_for_dedup else None, skip_previous)
+        if already and audit.status != "sent":
+            audit.auto_send = False
+            audit.step = f"Not sent: {already}"
+            db.commit()
+            raise HTTPException(status_code=409, detail=already)
     if not recipient:
         raise HTTPException(status_code=400, detail="Add the customer's email address first.")
     if not subject or not (body_html or "").strip():
@@ -945,6 +1001,7 @@ def send_audit(
         db.rollback()
         raise HTTPException(status_code=409, detail="This email is already being sent.")
     message.campaign_id = campaign.id if campaign else None  # per-account campaign report
+    message.cc_emails = cc
     db.add(message)
     db.refresh(audit)
     audit.email_subject, audit.email_html, audit.recipient_email = subject, body_html, recipient
@@ -968,6 +1025,7 @@ def send_audit(
             text_body=text_body,
             attachments=[EmailAttachment(filename=audit.pdf_filename or "website-audit.pdf", content=pdf)],
             headers={"Message-ID": rfc_message_id},  # no bulk-mail headers: 1-to-1 email, not a list
+            cc=cc,
         )
     except GmailSendError as exc:
         message.status, message.error_message, message.error_kind = "failed", str(exc), exc.kind

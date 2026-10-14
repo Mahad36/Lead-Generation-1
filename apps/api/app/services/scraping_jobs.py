@@ -54,6 +54,7 @@ def create_job(db: Session, user_id: str, data: ScrapingJobCreate) -> ScrapingJo
             "html_body": (data.html_body or "").strip(),
             "followups": data.followups,
             "schedule": data.schedule.as_dict() if data.schedule else None,
+            "recipients": {"include_generic": data.include_generic, "cc_enabled": data.cc_enabled, "cc_max": data.cc_max},
         },
         outreach_status="off" if data.outreach_mode == "off" else "running",
         outreach_auto_send=data.outreach_mode != "review",

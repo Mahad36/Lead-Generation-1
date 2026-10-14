@@ -25,6 +25,10 @@ export type Outreach = Tracking & {
   has_email: boolean;
   email_subject: string;
   sent_at: string | null;
+  // The Gmail account that sent the latest first email, the address it went to, and any CC'd colleagues
+  sent_from?: string;
+  sent_to?: string;
+  cc?: string[];
 };
 
 export type OutreachLead = {
@@ -137,7 +141,7 @@ export function OutreachTable({ leads, actions }: { leads: OutreachLead[]; actio
       <table className="min-w-full text-left text-sm">
         <thead className="text-xs uppercase text-muted">
           <tr>
-            {["Company", "Email", "Website", "Workflow", "Score", "PDF", "Email status", ""].map((h) => (
+            {["Company", "Email", "Website", "Workflow", "Score", "PDF", "Email status", "Sent from", ""].map((h) => (
               <th key={h} className="whitespace-nowrap px-3 py-2">
                 {h}
               </th>
@@ -156,7 +160,13 @@ export function OutreachTable({ leads, actions }: { leads: OutreachLead[]; actio
                     {lead.city ? ` · ${lead.city}` : ""}
                   </div>
                 </td>
-                <td className="px-3 py-2">{lead.primary_email || "—"}</td>
+                <td className="px-3 py-2">
+                  <div>{o?.sent_to || lead.primary_email || "—"}</div>
+                  {o?.sent_to && lead.primary_email && o.sent_to !== lead.primary_email.toLowerCase() ? (
+                    <div className="text-xs text-muted">now primary: {lead.primary_email}</div>
+                  ) : null}
+                  {o?.cc?.length ? <div className="text-xs text-muted">CC: {o.cc.join(", ")}</div> : null}
+                </td>
                 <td className="max-w-[14rem] truncate px-3 py-2">
                   {lead.website_url ? (
                     <a className="text-primary" href={lead.website_url} target="_blank" rel="noreferrer">
@@ -188,6 +198,7 @@ export function OutreachTable({ leads, actions }: { leads: OutreachLead[]; actio
                 <td className="px-3 py-2">
                   <EmailCell o={o} />
                 </td>
+                <td className="whitespace-nowrap px-3 py-2 text-xs">{o?.sent_from || <span className="text-muted">—</span>}</td>
                 <td className="whitespace-nowrap px-3 py-2 text-right">
                   {actions ? actions(lead) : null}
                   <Link href={`/leads/${lead.id}`}>

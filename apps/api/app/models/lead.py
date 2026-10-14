@@ -100,8 +100,14 @@ class LeadEmail(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         String(32), default="not_checked", nullable=False
     )
     verification_details: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
+    # personal (a named person) | department (sales@, marketing@...) | generic (info@, contact@...)
     email_type: Mapped[str] = mapped_column(String(32), default="general", nullable=False)
     is_verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # From the page the address was found on (services/contacts.py), when stated there
+    contact_name: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    job_title: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    rank_reason: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    discovered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     lead: Mapped[Lead] = relationship(back_populates="emails")
 

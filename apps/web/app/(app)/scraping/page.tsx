@@ -2,6 +2,7 @@
 
 import { FileOutreachControls, OutreachModePicker, type FileOutreach, type OutreachMode } from "@/components/file-outreach";
 import { LocationPicker, searchArea, type Location } from "@/components/location-picker";
+import { DEFAULT_RECIPIENTS, RecipientOptionsBox, recipientsForApi, type RecipientOptions } from "@/components/email-rotation";
 import { CitySuggestions, DEFAULT_SCHEDULE, SchedulePicker, scheduleForApi, type Schedule } from "@/components/schedule-picker";
 import { SendFrom } from "@/components/send-from";
 import { OutreachTable, type OutreachLead } from "@/components/outreach";
@@ -54,6 +55,7 @@ export default function ScrapingPage() {
   // Several states / cities per file: each one is searched for every business type
   const [areas, setAreas] = useState<string[]>(["Miami, Florida"]);
   const [schedule, setSchedule] = useState<Schedule>(DEFAULT_SCHEDULE);
+  const [recipients, setRecipients] = useState<RecipientOptions>(DEFAULT_RECIPIENTS);
   const [windowLabel, setWindowLabel] = useState("");
   const setLocation = (next: Location) => {
     if (next.country !== location.country) setAreas([]); // places belong to one country
@@ -164,6 +166,7 @@ export default function ScrapingPage() {
         outreach_email_account_id: outreachAccount || undefined,
         followups,
         schedule: scheduleForApi(schedule),
+        ...recipientsForApi(recipients),
       }),
     });
     const started = await api<Job>(`/api/scraping/jobs/${created.id}/start`, { method: "POST" });
@@ -301,6 +304,7 @@ export default function ScrapingPage() {
           <div className="space-y-2">
             <SendFrom className="max-w-md" value={outreachAccount} onChange={setOutreachAccount} />
             <SchedulePicker country={location.country} areas={areas} value={schedule} onChange={setSchedule} windowLabel={windowLabel} />
+            <RecipientOptionsBox value={recipients} onChange={setRecipients} />
             <label className="flex items-start gap-2 text-sm">
               <input type="checkbox" className="mt-1" checked={followups} onChange={(e) => setFollowups(e.target.checked)} />
               <span>

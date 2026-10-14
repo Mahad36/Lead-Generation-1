@@ -382,6 +382,8 @@ def send_smtp_message(
     data = _smtp_payload(account)
     if not data:
         raise GmailSendError("SMTP account is missing credentials", retryable=False)
+    # The envelope: To plus any CC'd business contacts (the Cc header is what the recipients see)
+    recipients = [to] + [a.strip() for a in ((headers or {}).get("Cc") or "").split(",") if a.strip()]
     message = _build_message(
         sender=sender_header(account),
         to=to,
@@ -398,7 +400,7 @@ def send_smtp_message(
         if port == 465:
             with smtplib.SMTP_SSL(data["host"], port, timeout=30) as smtp:
                 smtp.login(username, password)
-                smtp.sendmail(account.email_address, [to], message.as_string())
+                smtp.sendmail(account.email_address, recipients, message.as_string())
         else:
             with smtplib.SMTP(data["host"], port, timeout=30) as smtp:
                 smtp.ehlo()
@@ -406,7 +408,7 @@ def send_smtp_message(
                     smtp.starttls()
                     smtp.ehlo()
                 smtp.login(username, password)
-                smtp.sendmail(account.email_address, [to], message.as_string())
+                smtp.sendmail(account.email_address, recipients, message.as_string())
         account.last_successful_send_at = datetime.now(UTC)
         account.last_error = ""
         account.status = "connected"
@@ -489,9 +491,13 @@ def send_gmail_message(
     text_body: str = "",
     attachments: list[EmailAttachment] | None = None,
     headers: dict[str, str] | None = None,
+    cc: list[str] | None = None,
 ) -> str:
     if account.status == "disconnected":
         raise GmailSendError("Email account is disconnected", retryable=False)
+    cc = [a for a in dict.fromkeys(x.strip().lower() for x in (cc or [])) if a and a != to.strip().lower()]
+    if cc:
+        headers = {**(headers or {}), "Cc": ", ".join(cc)}  # visible to all recipients, as in Gmail
     if _smtp_payload(account):
         return send_smtp_message(
             db,

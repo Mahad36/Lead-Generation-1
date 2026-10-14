@@ -126,6 +126,8 @@ class EmailMessage(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     # First emails: follow-ups go out after it (decided when it was sent); done = finished or stopped
     followups_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     followups_done_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Additional business recipients on the same domain (campaign option "Additional Business Recipients (CC)")
+    cc_emails: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
     # Failed sends: temporary | quota | rate_limited | auth | recipient | rejected | other
     error_kind: Mapped[str] = mapped_column(String(32), default="", nullable=False)
 

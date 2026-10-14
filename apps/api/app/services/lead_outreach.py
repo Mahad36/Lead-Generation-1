@@ -141,6 +141,7 @@ def outreach_for_leads(db: Session, user_id: str, leads: list[Lead]) -> dict[str
         else {}
     )
     queued_in = _open_campaigns(db, user_id, ids)
+    sent_from = _sent_from(db, ids)
     out: dict[str, dict] = {}
     for lead in leads:
         audit = audits.get(lead.id)
@@ -176,8 +177,34 @@ def outreach_for_leads(db: Session, user_id: str, leads: list[Lead]) -> dict[str
             "has_email": bool(audit and audit.email_html),
             "email_subject": audit.email_subject if audit else "",
             "sent_at": audit.sent_at if audit else None,
+            # The Gmail account that sent the latest first email to this business, and to whom
+            **sent_from.get(lead.id, {"sent_from": "", "sent_to": "", "cc": []}),
             **tracking_summary(message),
         }
+    return out
+
+
+def _sent_from(db: Session, lead_ids: list[str]) -> dict[str, dict]:
+    """{lead_id: {sent_from, sent_to, cc}} from the latest first email (audit or campaign) sent to each lead."""
+    from app.models import EmailAccount
+
+    if not lead_ids:
+        return {}
+    rows = (
+        db.query(EmailMessage.lead_id, EmailMessage.recipient_email, EmailMessage.cc_emails, EmailAccount.email_address)
+        .outerjoin(EmailAccount, EmailAccount.id == EmailMessage.email_account_id)
+        .filter(
+            EmailMessage.lead_id.in_(lead_ids),
+            EmailMessage.status == "sent",
+            EmailMessage.followup_of_id.is_(None),
+            EmailMessage.is_test.is_(False),
+        )
+        .order_by(EmailMessage.sent_at.asc())
+        .all()
+    )
+    out: dict[str, dict] = {}
+    for lead_id, to, cc, account in rows:  # oldest first: the latest one wins
+        out[lead_id] = {"sent_from": account or "", "sent_to": to or "", "cc": list(cc or [])}
     return out
 
 

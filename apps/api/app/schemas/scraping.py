@@ -51,6 +51,10 @@ class ScrapingJobCreate(BaseModel):
     followups: bool = True
     # When this file's emails go out (None: your sending hours)
     schedule: ScheduleIn | None = None
+    # Recipients per business (same as campaigns)
+    include_generic: bool = True
+    cc_enabled: bool = False
+    cc_max: int = Field(default=2, ge=0, le=5)
 
 
 class OutreachAction(BaseModel):

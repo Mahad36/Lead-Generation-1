@@ -1,6 +1,16 @@
 "use client";
 
-import { DEFAULT_ROTATION, EmailRotation, LaunchSummary, rotationForApi, type Rotation } from "@/components/email-rotation";
+import {
+  DEFAULT_RECIPIENTS,
+  DEFAULT_ROTATION,
+  EmailRotation,
+  LaunchSummary,
+  RecipientOptionsBox,
+  recipientsForApi,
+  rotationForApi,
+  type RecipientOptions,
+  type Rotation,
+} from "@/components/email-rotation";
 import { DEFAULT_SCHEDULE, SchedulePicker, scheduleForApi, type Schedule } from "@/components/schedule-picker";
 import { GmailSignatureStatus } from "@/components/send-from";
 import { Badge, Button, Card, Input, Label, Textarea } from "@/components/ui";
@@ -58,6 +68,8 @@ function NewCampaignForm() {
   const [rotation, setRotation] = useState<Rotation>(DEFAULT_ROTATION);
   // Audit campaigns: audits per day (0 = no limit), separate from sending capacity
   const [auditLimit, setAuditLimit] = useState(0);
+  // One email per company to its best contact; general inboxes allowed; CC off unless chosen
+  const [recipients, setRecipients] = useState<RecipientOptions>(DEFAULT_RECIPIENTS);
   const [scheduledAt, setScheduledAt] = useState("");
   const [saving, setSaving] = useState(false);
   const [uploading, setUploading] = useState(false);
@@ -112,6 +124,7 @@ function NewCampaignForm() {
     return {
       name,
       ...rotationForApi(rotation),
+      ...recipientsForApi(recipients),
       audit_limit: auditLimit || undefined,
       outreach_mode: outreachMode,
       add_signature: addSignature,
@@ -152,7 +165,7 @@ function NewCampaignForm() {
       .then(setPreview)
       .catch(() => setPreview(null));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [canSend, selected?.id, selected?.ready_leads, mode, JSON.stringify(rotation), auditLimit, outreachMode]);
+  }, [canSend, selected?.id, selected?.ready_leads, mode, JSON.stringify(rotation), JSON.stringify(recipients), auditLimit, outreachMode]);
 
   async function importCsv(file: File) {
     setUploading(true);
@@ -406,6 +419,9 @@ function NewCampaignForm() {
         {accounts.length ? (
           <div className="grid gap-3 sm:grid-cols-2">
             <EmailRotation value={rotation} onChange={setRotation} />
+            <div className="sm:col-span-2">
+              <RecipientOptionsBox value={recipients} onChange={setRecipients} />
+            </div>
             {audit ? (
               <label className="flex flex-wrap items-center gap-2 text-sm sm:col-span-2">
                 Audits per day

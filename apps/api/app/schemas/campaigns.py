@@ -43,6 +43,10 @@ class CampaignCreate(BaseModel):
     account_ids: list[str] = []
     # Audit campaigns: audits per day (None / 0 = no limit); separate from how many emails the inboxes can send
     audit_limit: int | None = Field(default=None, ge=0, le=100000)
+    # Recipients per business: allow general inboxes (info@...) as primary; "Additional Business Recipients (CC)"
+    include_generic: bool = True
+    cc_enabled: bool = False
+    cc_max: int = Field(default=2, ge=0, le=5)
 
     @model_validator(mode="after")
     def require_leads_or_import(self):

@@ -80,6 +80,10 @@ def candidate_leads_query(db: Session, user_id: str, job_id: str | None = None):
         )
     )
     suppressed = select(SuppressionEntry.email).where(SuppressionEntry.user_id == user_id)
+    # One company = one outreach: skip leads whose business domain was already emailed through another lead
+    contacted_domains = select(Lead.website_domain).where(
+        Lead.user_id == user_id, Lead.last_contacted_at.isnot(None), Lead.website_domain != ""
+    )
     query = db.query(Lead).filter(
         Lead.user_id == user_id,
         Lead.website_url != "",
@@ -94,6 +98,7 @@ def candidate_leads_query(db: Session, user_id: str, job_id: str | None = None):
         Lead.id.not_in(exhausted),
         Lead.id.not_in(in_campaign),
         func.lower(Lead.primary_email).not_in(suppressed),
+        Lead.website_domain.not_in(contacted_domains),
     )
     if job_id:
         query = query.filter(Lead.scraping_job_id == job_id)

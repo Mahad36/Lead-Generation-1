@@ -163,6 +163,7 @@ type Summary = {
   compliance: { country: string; count: number; note: string }[];
   main_country: string;
   best_time: { label: string; note: string } | null;
+  recipients_preview?: { lead_id: string; business: string; to: string; reason: string; cc: string[] }[];
 };
 
 const MODE_LABEL: Record<string, string> = {
@@ -196,6 +197,38 @@ export function LaunchSummary({ s }: { s?: Summary | null }) {
           <span className="font-medium">Best time for {s.main_country}:</span> {s.best_time.label}. {s.best_time.note}
         </div>
       ) : null}
+      {s.recipients_preview?.length ? (
+        <details className="text-xs" open>
+          <summary className="cursor-pointer font-medium">Who receives it (first {s.recipients_preview.length} businesses)</summary>
+          <div className="mt-1 max-h-64 overflow-auto">
+            <table className="w-full text-left">
+              <thead className="text-muted">
+                <tr>
+                  <th className="py-1 pr-2">Business</th>
+                  <th className="py-1 pr-2">To</th>
+                  <th className="py-1 pr-2">CC</th>
+                  <th className="py-1">Why</th>
+                </tr>
+              </thead>
+              <tbody>
+                {s.recipients_preview.map((r) => (
+                  <tr key={r.lead_id} className="border-t border-border">
+                    <td className="py-1 pr-2">
+                      <Link className="underline" href={`/leads/${r.lead_id}`} target="_blank">
+                        {r.business}
+                      </Link>
+                    </td>
+                    <td className="py-1 pr-2">{r.to || <span className="text-amber-700">skipped</span>}</td>
+                    <td className="py-1 pr-2">{r.cc.join(", ") || "—"}</td>
+                    <td className="py-1 text-muted">{r.reason}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <p className="mt-1 text-muted">Open a business to choose a different contact before launching.</p>
+        </details>
+      ) : null}
       {s.warnings.length ? (
         <ul className="list-disc space-y-0.5 pl-5 text-xs text-amber-700 dark:text-amber-300">
           {s.warnings.map((w) => (
@@ -224,6 +257,62 @@ function Stat({ label, value }: { label: string; value: string | number }) {
     <div className="rounded-lg bg-background px-3 py-2">
       <div className="text-xs text-muted">{label}</div>
       <div className="font-semibold">{value}</div>
+    </div>
+  );
+}
+
+export type RecipientOptions = { includeGeneric: boolean; ccEnabled: boolean; ccMax: number };
+export const DEFAULT_RECIPIENTS: RecipientOptions = { includeGeneric: true, ccEnabled: false, ccMax: 2 };
+
+export function recipientsForApi(r: RecipientOptions) {
+  return { include_generic: r.includeGeneric, cc_enabled: r.ccEnabled, cc_max: r.ccMax };
+}
+
+/** Who gets each business's email: one primary contact, general inboxes allowed or not, optional CC. */
+export function RecipientOptionsBox({ value, onChange }: { value: RecipientOptions; onChange: (next: RecipientOptions) => void }) {
+  const set = (patch: Partial<RecipientOptions>) => onChange({ ...value, ...patch });
+  return (
+    <div className="space-y-2 rounded-xl border border-border p-3 text-sm">
+      <div className="font-medium">Recipients at each business</div>
+      <p className="text-xs text-muted">
+        One email per company, to its best contact: an owner / founder / director named on the website first, then a
+        marketing or sales contact, then a general inbox. Change the choice for any business on its lead page.
+      </p>
+      <label className="flex items-start gap-2">
+        <input type="checkbox" className="mt-1" checked={value.includeGeneric} onChange={(e) => set({ includeGeneric: e.target.checked })} />
+        <span>
+          Allow general inboxes (info@, contact@, hello@)
+          <span className="block text-xs text-muted">
+            Used when no individual contact is found. Untick to email only named or department contacts (businesses
+            with only a general inbox are then skipped).
+          </span>
+        </span>
+      </label>
+      <label className="flex items-start gap-2">
+        <input type="checkbox" className="mt-1" checked={value.ccEnabled} onChange={(e) => set({ ccEnabled: e.target.checked })} />
+        <span>
+          Additional Business Recipients (CC)
+          <span className="block text-xs text-muted">
+            CC other relevant named or department contacts of the same business (never general inboxes, never
+            unsubscribed addresses). Everyone sees who else received it, so use it only when they work together.
+          </span>
+        </span>
+      </label>
+      {value.ccEnabled ? (
+        <label className="ml-6 flex items-center gap-2 text-xs">
+          At most
+          <select
+            className="rounded-md border border-border bg-card px-2 py-1"
+            value={value.ccMax}
+            onChange={(e) => set({ ccMax: Number(e.target.value) })}
+          >
+            {[1, 2, 3].map((n) => (
+              <option key={n}>{n}</option>
+            ))}
+          </select>
+          CC per email
+        </label>
+      ) : null}
     </div>
   );
 }

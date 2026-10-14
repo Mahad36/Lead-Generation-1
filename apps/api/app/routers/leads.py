@@ -1,5 +1,6 @@
-from fastapi import APIRouter, Depends, File, Query, Request, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import PlainTextResponse
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -200,3 +201,57 @@ def mark_dnc(lead_id: str, user: User = Depends(get_current_user), db: Session =
 
         add_suppression(db, user.id, lead.primary_email, reason="manual", source="do_not_contact")
     return {"message": "Lead marked do not contact"}
+
+
+# ---------------------------------------------------------------- business contacts (services/contacts.py)
+
+
+class PrimaryIn(BaseModel):
+    email: str | None = None  # None / "": back to the automatic choice
+
+
+@router.get("/{lead_id}/contacts")
+def lead_contacts(lead_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Every address found for this business with its type, status and ranking; the primary and CC suggestion."""
+    from app.services.contacts import contacts_payload
+
+    return contacts_payload(db, lead_service.get_lead(db, user.id, lead_id))
+
+
+@router.post("/{lead_id}/contacts/discover")
+def discover_lead_contacts(lead_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Read the business's contact / about / team / imprint pages again for addresses, names and job titles."""
+    from app.services.contacts import contacts_payload, discover
+
+    lead = lead_service.get_lead(db, user.id, lead_id)
+    discover(db, lead)
+    db.refresh(lead)
+    return contacts_payload(db, lead)
+
+
+@router.post("/{lead_id}/contacts/primary")
+def choose_lead_primary(
+    lead_id: str, payload: PrimaryIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)
+):
+    """Your choice of who gets the email at this business (overrides the automatic ranking)."""
+    from app.services.contacts import contacts_payload, set_primary_override
+
+    lead = lead_service.get_lead(db, user.id, lead_id)
+    try:
+        set_primary_override(db, lead, payload.email)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    # A waiting audit email follows your choice
+    from app.models import WebsiteAudit
+
+    audit = (
+        db.query(WebsiteAudit)
+        .filter(WebsiteAudit.lead_id == lead.id, WebsiteAudit.sent_at.is_(None))
+        .order_by(WebsiteAudit.created_at.desc())
+        .first()
+    )
+    if audit and lead.primary_email:
+        audit.recipient_email = lead.primary_email
+        db.commit()
+    db.refresh(lead)
+    return contacts_payload(db, lead)

@@ -21,6 +21,7 @@ from app.models import (
 from app.schemas.campaigns import CampaignCreate
 from app.services.ai import AINotConfiguredError, generate_personalized_email
 from app.services.audit import write_audit
+from app.services.contacts import company_already_contacted, recipient_options, select_recipients
 from app.services.deliverability import (
     MIN_SEND_GAP_SECONDS,
     account_ready,
@@ -292,6 +293,12 @@ def create_campaign(db: Session, user_id: str, data: CampaignCreate, meta: dict)
         "schedule": data.schedule.as_dict() if data.schedule else None,
         # Audit campaigns: audits per day (0 = no limit), separate from what the inboxes can send
         "audit_limit": data.audit_limit or 0,
+        # Who receives each email: general inboxes allowed?, CC'd colleagues (off by default), at most cc_max
+        "recipients": {
+            "include_generic": data.include_generic,
+            "cc_enabled": data.cc_enabled,
+            "cc_max": data.cc_max,
+        },
         # Email rotation: single | auto | selected | health, and the accounts it may use
         "rotation": {"mode": rotation_mode, "account_ids": list(data.account_ids or [])},
         # Template campaigns send in one batch: their schedule follows the leads' most common time zone
@@ -725,6 +732,20 @@ def send_claimed_lead(db: Session, campaign_lead: CampaignLead) -> str:
         campaign_lead.locked_at = None
         db.commit()
         return "skipped"
+    # One message per company, to its best contact (CC'd colleagues only when the campaign allows it)
+    already = company_already_contacted(db, lead, campaign.id, campaign.skip_previously_contacted)
+    options = recipient_options(campaign.extra)
+    choice = select_recipients(
+        db, lead, include_generic=options["include_generic"], cc_enabled=options["cc_enabled"], cc_max=options["cc_max"]
+    )
+    if already or not choice["to"]:
+        campaign_lead.status = "skipped"
+        campaign_lead.skip_reason = "company_already_contacted" if already else "no_eligible_recipient"
+        campaign_lead.error_message = already or choice["reason"]
+        campaign_lead.locked_at = None
+        db.commit()
+        return "skipped"
+    to, cc = choice["to"], choice["cc"]
     if account.user_id != campaign.user_id:
         campaign_lead.status = "failed"
         campaign_lead.error_message = "Email account does not belong to this user"
@@ -764,7 +785,7 @@ def send_claimed_lead(db: Session, campaign_lead: CampaignLead) -> str:
         campaign_lead.locked_by = ""
         db.commit()
         return "spacing"
-    problem = address_problem(db, campaign.user_id, lead.primary_email)
+    problem = address_problem(db, campaign.user_id, to)
     if problem:
         campaign_lead.status = "skipped"
         campaign_lead.skip_reason = "email_domain_rejects_mail"
@@ -797,7 +818,7 @@ def send_claimed_lead(db: Session, campaign_lead: CampaignLead) -> str:
     )
     from app.utils.templates import render_template as render_vars
 
-    unsub_url = unsubscribe_url(campaign.user_id, lead.primary_email)
+    unsub_url = unsubscribe_url(campaign.user_id, to)
     rfc_message_id = new_rfc_message_id(account.email_address)
     html_body = render_vars(campaign_lead.html_body, {"unsubscribe_url": unsub_url})
     text_body = render_vars(campaign_lead.text_body or "", {"unsubscribe_url": unsub_url})
@@ -819,7 +840,7 @@ def send_claimed_lead(db: Session, campaign_lead: CampaignLead) -> str:
         campaign_lead_id=campaign_lead.id,
         lead_id=lead.id,
         email_account_id=account.id,
-        recipient_email=lead.primary_email,
+        recipient_email=to,
         recipient_name=lead.business_name,
         subject=campaign_lead.subject,
         html_body=html_body,
@@ -827,6 +848,7 @@ def send_claimed_lead(db: Session, campaign_lead: CampaignLead) -> str:
         status="sending",
         rfc_message_id=rfc_message_id,
         followups_enabled=bool(not settings or settings.followups_enabled) and campaign_followups(campaign),
+        cc_emails=cc,
     )
     db.add(message)
     db.commit()
@@ -834,7 +856,8 @@ def send_claimed_lead(db: Session, campaign_lead: CampaignLead) -> str:
         provider_id = send_gmail_message(
             db,
             account,
-            to=lead.primary_email,
+            to=to,
+            cc=cc,
             subject=campaign_lead.subject,
             html_body=(
                 track_links(html_body, message.id, skip=(unsub_url,)) + open_pixel_html(message.id) if tracked else html_body
@@ -875,7 +898,7 @@ def send_claimed_lead(db: Session, campaign_lead: CampaignLead) -> str:
         if exc.kind == "recipient":
             from app.services.account_health import suppress_refused_recipient
 
-            suppress_refused_recipient(db, campaign.user_id, lead.id, lead.primary_email)
+            suppress_refused_recipient(db, campaign.user_id, lead.id, to)
         campaign_lead.attempts += 1
         campaign_lead.error_message = str(exc)
         campaign_lead.locked_at = None
@@ -1464,6 +1487,22 @@ def launch_summary(db: Session, user_id: str, lead_ids: list[str], data: Campaig
         per_day = min(per_day, audit_limit) if per_day else 0
     days = ceil(to_send / per_day) if per_day and to_send else None
 
+    # Who each business's email goes to (primary + CC), for review before launching
+    recipients_preview = []
+    for lead in valid[:25]:
+        choice = select_recipients(
+            db, lead, include_generic=data.include_generic, cc_enabled=data.cc_enabled, cc_max=data.cc_max
+        )
+        recipients_preview.append(
+            {"lead_id": lead.id, "business": lead.business_name, "to": choice["to"], "reason": choice["reason"], "cc": choice["cc"]}
+        )
+    no_recipient = sum(1 for r in recipients_preview if not r["to"])
+    if no_recipient:
+        warnings.append(
+            f"{no_recipient} of the first {len(recipients_preview)} businesses have no eligible address"
+            + (" (general inboxes are excluded)" if not data.include_generic else "")
+            + " and will be skipped."
+        )
     countries = Counter((lead.country or "").strip() for lead in valid if (lead.country or "").strip())
     main_country = countries.most_common(1)[0][0] if countries else ""
     compliance = [
@@ -1487,4 +1526,7 @@ def launch_summary(db: Session, user_id: str, lead_ids: list[str], data: Campaig
         "compliance": compliance,
         "main_country": main_country,
         "best_time": best_time(main_country) if main_country else None,
+        "recipients_preview": recipients_preview,
+        "include_generic": data.include_generic,
+        "cc_enabled": data.cc_enabled,
     }
