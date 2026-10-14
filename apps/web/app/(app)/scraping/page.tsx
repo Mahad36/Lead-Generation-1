@@ -1,6 +1,7 @@
 "use client";
 
 import { FileOutreachControls, OutreachModePicker, type FileOutreach, type OutreachMode } from "@/components/file-outreach";
+import { BusinessTypeSelect } from "@/components/business-types";
 import { LocationPicker, searchArea, type Location } from "@/components/location-picker";
 import { DEFAULT_RECIPIENTS, RecipientOptionsBox, recipientsForApi, type RecipientOptions } from "@/components/email-rotation";
 import { CitySuggestions, DEFAULT_SCHEDULE, SchedulePicker, scheduleForApi, type Schedule } from "@/components/schedule-picker";
@@ -35,6 +36,7 @@ type Job = {
   new_leads: number;
   duplicate_leads: number;
   skipped_no_email?: number;
+  discarded?: number;
   analyzed_count?: number;
   finding_emails?: boolean;
   outreach?: FileOutreach | null;
@@ -184,7 +186,7 @@ export default function ScrapingPage() {
     const res = await api<{ checking: number; started: boolean }>(`/api/scraping/jobs/${id}/find-emails`, { method: "POST" });
     toast.success(
       res.checking
-        ? `Checking ${res.checking} websites for emails. Leads update as emails are found.`
+        ? `Searching ${res.checking} websites for emails. Leads with an email are added; the rest are removed.`
         : "Every lead with a website already has an email."
     );
     await refresh(id);
@@ -309,11 +311,13 @@ export default function ScrapingPage() {
               </button>
             ))}
           </div>
-          <div className="mt-2 flex gap-2">
+          <div className="mt-2 flex flex-wrap gap-2">
+            <BusinessTypeSelect selected={types} onAdd={(t) => setTypes((rows) => (rows.includes(t) ? rows : [...rows, t]))} />
             <Input
+              className="min-w-[14rem] flex-1"
               value={typeDraft}
               onChange={(e) => setTypeDraft(e.target.value)}
-              placeholder="Plumbers, HVAC, Roofers…"
+              placeholder="...or type your own (e.g. Boat dealers)"
               onKeyDown={(e) => {
                 if (e.key === "Enter") {
                   e.preventDefault();
@@ -375,7 +379,9 @@ export default function ScrapingPage() {
             <div>
               <h2 className="font-medium">{job.name || "Current scrape"}</h2>
               <p className="text-sm text-muted">
-                Scraped {job.businesses_found || 0} · With email {job.new_leads || 0} · Without email {job.skipped_no_email || 0} (kept, not emailed) · Analyzed {job.analyzed_count || 0}
+                Scraped {job.businesses_found || 0} · Leads with email {job.new_leads || 0}
+                {job.skipped_no_email ? ` · ${job.skipped_no_email} websites being searched for an email` : ""}
+                {job.discarded ? ` · ${job.discarded} skipped (no email found)` : ""} · Analyzed {job.analyzed_count || 0}
               </p>
               {(job.status === "failed" || job.status === "blocked") && job.error_message ? (
                 <p className="mt-1 text-sm text-danger">Reason: {job.error_message}</p>
@@ -391,7 +397,7 @@ export default function ScrapingPage() {
                 <Badge tone="warn">Finding emails…</Badge>
               ) : (job.skipped_no_email || 0) > 0 && !["queued", "running"].includes(job.status) ? (
                 <Button variant="secondary" onClick={() => findMissingEmails(job.id).catch((e) => toast.error(e.message))}>
-                  Find missing emails
+                  Search websites for emails
                 </Button>
               ) : null}
               <Link href={`/leads?kind=scrape&id=${job.id}`}>

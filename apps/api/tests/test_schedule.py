@@ -60,3 +60,17 @@ def test_start_at_holds_emails_until_then(monkeypatch):
     assert caught.value.step == deliverability.WAITING_FOR_SCHEDULE
     schedule["start_at"] = None
     deliverability.require_send_time(None, "u", schedule, lead)  # every day, all day: sends now
+
+
+def test_suggestions_for_every_country():
+    for country in ("Vietnam", "Kenya", "Peru", "Pakistan", "Norway"):
+        rows = suggested_cities(country)
+        assert len(rows) >= 5, country
+        assert any("Most businesses" in r["tags"] for r in rows)
+    assert suggested_cities("Vietnam")[0]["area"].startswith("Ho Chi Minh")
+
+
+def test_send_now_ignores_hours():
+    lead = SimpleNamespace(country="Australia", city="Sydney", address="")
+    deliverability.require_send_time(None, "u", {"mode": "now", "days": [], "start": 9, "end": 11, "start_at": None}, lead)
+    assert next_send_time(None, "u", {"mode": "now"}, "") <= datetime.now(UTC) + timedelta(seconds=1)

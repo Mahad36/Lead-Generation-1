@@ -95,7 +95,7 @@ def find_missing_emails(job_id: str, user: User = Depends(get_current_user), db:
 
     job = scraping_service.get_job(db, user.id, job_id)
     count = len(leads_missing_email(db, job))
-    started = start_recheck(job.id) if count else False
+    started = start_recheck(job.id, discard_missing=True) if count else False  # still none: removed
     return {"checking": count, "started": started}
 
 

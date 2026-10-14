@@ -15,7 +15,7 @@ class ScheduleIn(BaseModel):
     """When automatic emails go out. "local": these days and hours in each lead's own time zone;
     "global": your sending hours (AI & settings). start_at: nothing goes out before this moment."""
 
-    mode: Literal["local", "global"] = "local"
+    mode: Literal["local", "global", "now"] = "local"  # now: as soon as each email is ready
     days: list[int] = Field(default_factory=lambda: [1, 2, 3])  # Monday = 0 ... Sunday = 6
     start: int = Field(default=9, ge=0, le=23)
     end: int = Field(default=11, ge=1, le=24)

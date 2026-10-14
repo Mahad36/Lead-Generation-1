@@ -305,10 +305,45 @@ MARKETS: dict[str, list[tuple[str, tuple[str, ...], str]]] = {
 }
 
 
+_WORLD: dict | None = None
+
+
+def _world() -> dict:
+    """The largest cities of every country (population), from GeoNames (geonames.org, CC BY 4.0)."""
+    global _WORLD
+    if _WORLD is None:
+        import json
+        from pathlib import Path
+
+        path = Path(__file__).resolve().parent.parent / "data" / "world_cities.json"
+        try:
+            _WORLD = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            _WORLD = {}
+    return _WORLD
+
+
+def _population(n: int) -> str:
+    return f"{n / 1_000_000:.1f} million people" if n >= 1_000_000 else f"{n // 1000}k people"
+
+
 def suggested_cities(country: str, state: str = "") -> list[dict]:
-    """Suggested places for a country (only that state's, when one is chosen and listed)."""
-    rows = MARKETS.get(country, [])
+    """Suggested places for any country: the hand-picked markets (with income notes) where available, plus the
+    country's largest cities by population. Only that state's / region's places when one is chosen."""
+    rows = [{"area": area, "tags": list(tags), "why": why} for area, tags, why in MARKETS.get(country, [])]
+    known = {r["area"].split(",")[0].lower() for r in rows}
+    world = (_world().get(country) or {}).get("cities") or []
+    for index, city in enumerate(world):
+        name = city["area"].split(",")[0]
+        if name.lower() in known:
+            continue
+        known.add(name.lower())
+        tags = [BIG] if index < 8 else []
+        why = ("Capital city, " if city.get("capital") else "") + f"about {_population(city['population'])}"
+        if city.get("capital"):
+            tags.append("Capital")
+        rows.append({"area": city["area"], "tags": tags, "why": why})
     if state:
-        in_state = [r for r in rows if state.lower() in r[0].lower()]
+        in_state = [r for r in rows if state.lower() in r["area"].lower()]
         rows = in_state or rows
-    return [{"area": area, "tags": list(tags), "why": why} for area, tags, why in rows]
+    return rows[:30]

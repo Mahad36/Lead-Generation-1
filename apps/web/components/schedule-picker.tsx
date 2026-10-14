@@ -7,7 +7,7 @@ import { useEffect, useState } from "react";
 
 /** When a file's / campaign's automatic emails go out (apps/api/app/schemas/scraping.py::ScheduleIn). */
 export type Schedule = {
-  mode: "local" | "global"; // local: these days and hours in each lead's own time zone; global: my sending hours
+  mode: "local" | "global" | "now"; // local: set hours in each lead's time; global: my sending hours; now: right away
   days: number[]; // Monday = 0 ... Sunday = 6
   start: number;
   end: number;
@@ -70,7 +70,9 @@ export function CitySuggestions({
         </button>
         {open ? (
           <div className="flex flex-wrap gap-1">
-            {(["all", "Most businesses", "High-paying clients"] as const).map((t) => (
+            {(["all", "Most businesses", "High-paying clients"] as const)
+              .filter((t) => t === "all" || cities.some((c) => c.tags.includes(t)))
+              .map((t) => (
               <Button key={t} type="button" variant={tag === t ? "primary" : "secondary"} onClick={() => setTag(t)}>
                 {t === "all" ? "All" : t}
               </Button>
@@ -101,8 +103,9 @@ export function CitySuggestions({
             })}
           </div>
           <p className="mt-2 text-xs text-muted">
-            A guide based on business density and household income, not live data. Bigger markets give more leads;
-            high-income areas have owners more able to pay for a new website.
+            Largest cities by population for every country (GeoNames, geonames.org), plus hand-picked notes on
+            business density and income where available. Bigger markets give more leads; high-income areas have owners
+            more able to pay for a new website.
           </p>
         </>
       ) : null}
@@ -202,6 +205,10 @@ export function SchedulePicker({
 
       <div className="flex flex-wrap gap-4 text-sm">
         <label className="flex items-center gap-2">
+          <input type="radio" checked={value.mode === "now"} onChange={() => set({ mode: "now" })} />
+          Send now (each email as soon as it&apos;s ready)
+        </label>
+        <label className="flex items-center gap-2">
           <input type="radio" checked={value.mode === "local"} onChange={() => set({ mode: "local" })} />
           At set hours in each lead&apos;s own time
         </label>
@@ -261,8 +268,10 @@ export function SchedulePicker({
         </div>
       ) : null}
       <p className="text-xs text-muted">
-        Leads are still found and audited straight away; their emails wait until the schedule opens. Follow-ups use the
-        same schedule. Daily limits and spacing between emails still apply.
+        {value.mode === "now"
+          ? "Each email goes out as soon as its audit is ready, at any hour. Daily limits and 2 minutes between emails still apply."
+          : "Leads are still found and audited straight away; their emails wait until the schedule opens."}{" "}
+        Follow-ups use the same schedule.
       </p>
     </div>
   );

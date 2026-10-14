@@ -137,6 +137,8 @@ def _send_time_ok(db: Session, root: EmailMessage) -> bool:
 
     campaign, job, _ = _origin(db, root)
     schedule = ((campaign.extra if campaign else None) or (job.extra if job else None) or {}).get("schedule")
+    if schedule and schedule.get("mode") == "now":
+        return send_time_ok(db, root.user_id, schedule, "")
     if not schedule or (schedule.get("mode") != "local" and not schedule.get("start_at")):
         return in_send_window(_settings(db, root.user_id))
     lead = db.get(Lead, root.lead_id) if root.lead_id else None

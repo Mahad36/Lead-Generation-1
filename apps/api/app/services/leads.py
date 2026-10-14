@@ -91,8 +91,8 @@ def import_batch_filter(batch: LeadImport):
 
 def _apply_filters(query, user_id: str, params: dict[str, Any]):
     query = query.filter(Lead.user_id == user_id)
-    if not params.get("scraping_job_id"):
-        query = query.filter(Lead.primary_email != "", Lead.status != "no_email")
+    # Lead records only list businesses with an email (leads still being searched / without one are not shown)
+    query = query.filter(Lead.primary_email != "", Lead.status != "no_email")
     if q := (params.get("q") or "").strip():
         like = f"%{q}%"
         query = query.filter(

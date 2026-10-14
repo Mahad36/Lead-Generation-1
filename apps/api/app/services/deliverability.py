@@ -288,6 +288,8 @@ def next_send_time(db: Session, user_id: str, schedule: dict | None, tz: str) ->
     now = datetime.now(UTC)
     start_at = _start_at(schedule)
     probe = max(now, start_at) if start_at else now
+    if schedule and schedule.get("mode") == "now":
+        return probe  # send now: no hours restriction (daily limits and spacing still apply)
     if not schedule or schedule.get("mode") != "local" or not tz:
         settings = _settings(db, user_id)
         local = probe.astimezone()
@@ -311,7 +313,9 @@ def send_time_ok(db: Session, user_id: str, schedule: dict | None, tz: str) -> b
 
 def require_send_time(db: Session, user_id: str, schedule: dict | None, lead) -> None:
     """Automatic sends: wait for the file's / campaign's schedule (in the lead's time), else your sending hours."""
-    if not schedule or (schedule.get("mode") != "local" and not schedule.get("start_at")):
+    if schedule and schedule.get("mode") == "now" and not schedule.get("start_at"):
+        return  # send now
+    if not schedule or (schedule.get("mode") not in ("local", "now") and not schedule.get("start_at")):
         require_send_window(db, user_id)
         return
     tz = lead_timezone(lead) if schedule.get("mode") == "local" else ""

@@ -136,6 +136,8 @@ def serialize_job(db: Session, job: ScrapingJob) -> dict:
         "campaign_sent_today": campaign.sent_today if campaign else 0,
         "campaign_daily_limit": campaign.daily_limit if campaign else 0,
         "skipped_no_email": int((job.extra or {}).get("skipped_no_email") or 0),
+        # Not kept: no email and no website, or no email even after searching the website
+        "discarded": int((job.extra or {}).get("discarded_no_contact") or 0) + int((job.extra or {}).get("discarded_no_email") or 0),
         "analyzed_count": analyzed,
         "finding_emails": _finding_emails(job.id),
         "outreach": job_outreach_status(db, job),
@@ -304,6 +306,9 @@ def run_scraping_job(db: Session, job_id: str) -> None:
             job.worker_status = "idle"
             job.finished_at = datetime.now(UTC)
         db.commit()
+        from app.services.email_recheck import start_recheck
+
+        start_recheck(job.id, discard_missing=True)  # anything still waiting for its email search
     except Exception as exc:
         logger.error("job_failed", job_id=job_id, error=str(exc))
         if not _refresh_job(db, job):
@@ -348,6 +353,16 @@ def _run_search(
         job.businesses_found += 1
         email = str((business.extra or {}).get("email") or "").strip()
         has_email = bool(email) and "@" in email
+        if not has_email and not (business.website or "").strip():
+            # No email and no website to find one on: not a lead for email outreach, so it isn't saved
+            from sqlalchemy.orm.attributes import flag_modified
+
+            extra = dict(job.extra or {})
+            extra["discarded_no_contact"] = int(extra.get("discarded_no_contact") or 0) + 1
+            job.extra = extra
+            flag_modified(job, "extra")
+            db.commit()
+            return
         existing = find_duplicate_lead(
             db,
             job.user_id,
@@ -381,7 +396,8 @@ def _run_search(
                 "primary_email": email if has_email else "",
                 "contact_name": (business.extra or {}).get("contact_name") or "",
                 "extra": business.extra,
-                # Kept without an email (phone, website and social links are still useful); never emailed.
+                # No email yet: held back (not listed) while its website gets one more thorough email search
+                # (email_recheck, after the search); discarded if none is found.
                 **({} if has_email else {"status": "no_email"}),
             },
             source="google_maps",
@@ -408,7 +424,8 @@ def _run_search(
 
             request_poll()
         # The website analysis (platform, score, more emails) still runs after the search, alongside the audits.
-        if lead.website_url:
+        # Leads without an email go through the email search first (it adds them here when it finds one).
+        if lead.website_url and has_email:
             pending_website_ids.append(lead.id)
 
     try:
@@ -460,3 +477,7 @@ def _run_search(
     from app.services.lead_pipeline import enqueue_lead_website_processing
 
     enqueue_lead_website_processing(pending_website_ids)
+    # One more, thorough email search on the websites of this search's leads without one; the rest are discarded
+    from app.services.email_recheck import start_recheck
+
+    start_recheck(job.id, discard_missing=True)
