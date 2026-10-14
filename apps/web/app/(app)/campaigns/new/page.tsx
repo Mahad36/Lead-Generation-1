@@ -1,5 +1,6 @@
 "use client";
 
+import { DEFAULT_SCHEDULE, SchedulePicker, scheduleForApi, type Schedule } from "@/components/schedule-picker";
 import { GmailSignatureStatus, SendFrom } from "@/components/send-from";
 import { Badge, Button, Card, Input, Label, Textarea } from "@/components/ui";
 import { api } from "@/lib/api";
@@ -50,6 +51,9 @@ function NewCampaignForm() {
   // Put the sending Gmail's own signature (read from Gmail) under each email of this campaign.
   const [addSignature, setAddSignature] = useState(true);
   const [followups, setFollowups] = useState(true);
+  // When the emails go out: set hours in each lead's own time (suggested per country), or my sending hours
+  const [schedule, setSchedule] = useState<Schedule>(DEFAULT_SCHEDULE);
+  const [scheduleCountry, setScheduleCountry] = useState("United States");
   const [scheduledAt, setScheduledAt] = useState("");
   const [saving, setSaving] = useState(false);
   const [uploading, setUploading] = useState(false);
@@ -107,6 +111,7 @@ function NewCampaignForm() {
       outreach_mode: outreachMode,
       add_signature: addSignature,
       followups,
+      schedule: scheduleForApi({ ...schedule, start_at: "" }), // the start date is the Schedule field below
       template_id: !audit && copyMode === "template" ? templateId || undefined : undefined,
       lead_ids: [],
       import_batch_id: selected?.kind === "import" ? selected.id : undefined,
@@ -381,6 +386,16 @@ function NewCampaignForm() {
                 </span>
               </span>
             </label>
+          </div>
+          <div className="mt-3">
+            <SchedulePicker
+              country={scheduleCountry}
+              areas={[]}
+              value={schedule}
+              onChange={setSchedule}
+              showStartAt={false}
+              onCountryChange={setScheduleCountry}
+            />
           </div>
         </div>
         {accounts.length ? (

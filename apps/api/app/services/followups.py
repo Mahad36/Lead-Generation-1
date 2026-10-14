@@ -130,6 +130,18 @@ def _on_hold(db: Session, root: EmailMessage) -> bool:
     return bool(job and job.outreach_status == "paused")
 
 
+def _send_time_ok(db: Session, root: EmailMessage) -> bool:
+    """The file's / campaign's schedule in the lead's time zone, else your sending hours."""
+    from app.services.deliverability import lead_timezone, send_time_ok
+
+    campaign, job, _ = _origin(db, root)
+    schedule = ((campaign.extra if campaign else None) or (job.extra if job else None) or {}).get("schedule")
+    if not schedule or (schedule.get("mode") != "local" and not schedule.get("start_at")):
+        return in_send_window(_settings(db, root.user_id))
+    lead = db.get(Lead, root.lead_id) if root.lead_id else None
+    return send_time_ok(db, root.user_id, schedule, lead_timezone(lead) if schedule.get("mode") == "local" else "")
+
+
 def _adds_signature(db: Session, root: EmailMessage) -> bool:
     campaign, _, _ = _origin(db, root)
     return not campaign or (campaign.extra or {}).get("add_signature", True) is not False
@@ -338,8 +350,7 @@ def run_followups(db: Session) -> dict:
     sent = waiting = 0
     used: set[str] = set()
     for root, step, steps in due_followups(db):
-        settings = _settings(db, root.user_id)
-        if not in_send_window(settings) or root.email_account_id in used or _on_hold(db, root):
+        if root.email_account_id in used or _on_hold(db, root) or not _send_time_ok(db, root):
             waiting += 1
             continue
         account = db.get(EmailAccount, root.email_account_id)

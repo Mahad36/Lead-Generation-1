@@ -2,6 +2,7 @@
 
 import { FileOutreachControls, OutreachModePicker, type FileOutreach, type OutreachMode } from "@/components/file-outreach";
 import { LocationPicker, searchArea, type Location } from "@/components/location-picker";
+import { CitySuggestions, DEFAULT_SCHEDULE, SchedulePicker, scheduleForApi, type Schedule } from "@/components/schedule-picker";
 import { SendFrom } from "@/components/send-from";
 import { OutreachTable, type OutreachLead } from "@/components/outreach";
 import { Badge, Button, Card, Input, Label } from "@/components/ui";
@@ -49,7 +50,19 @@ type Job = {
 
 export default function ScrapingPage() {
   const [jobName, setJobName] = useState("");
-  const [location, setLocation] = useState<Location>({ country: "United States", area: "Miami, Florida" });
+  const [location, setLocationState] = useState<Location>({ country: "United States", area: "" });
+  // Several states / cities per file: each one is searched for every business type
+  const [areas, setAreas] = useState<string[]>(["Miami, Florida"]);
+  const [schedule, setSchedule] = useState<Schedule>(DEFAULT_SCHEDULE);
+  const [windowLabel, setWindowLabel] = useState("");
+  const setLocation = (next: Location) => {
+    if (next.country !== location.country) setAreas([]); // places belong to one country
+    setLocationState(next);
+  };
+  const addArea = (area: string) => {
+    const value = area.trim();
+    if (value) setAreas((rows) => (rows.includes(value) ? rows : [...rows, value]));
+  };
   const [typeDraft, setTypeDraft] = useState("");
   const [types, setTypes] = useState<string[]>(["Plumbers"]);
   const [job, setJob] = useState<Job | null>(null);
@@ -85,6 +98,12 @@ export default function ScrapingPage() {
       .then((s) => {
         setDailyLimit(s.default_daily_send_limit || 50);
         setSource({ provider: s.scraper_provider, apifyReady: Boolean(s.apify_configured) });
+        if (s.send_window_enabled) {
+          const h = (n: number) => `${String(n % 24).padStart(2, "0")}:00`;
+          setWindowLabel(`${h(s.send_window_start)}-${h(s.send_window_end)}${s.send_weekdays_only ? ", Mon-Fri" : ""}`);
+        } else {
+          setWindowLabel("any time");
+        }
       })
       .catch(() => undefined);
   }, []);
@@ -120,13 +139,18 @@ export default function ScrapingPage() {
       toast.error("Enter a lead/job name");
       return;
     }
-    const area = searchArea(location);
-    if (!area || !location.country || !types.length) {
-      toast.error("Choose a country, a state or city, and at least one business type");
+    const typed = searchArea(location);
+    const places = typed && !areas.includes(typed) ? [...areas, typed] : areas;
+    if (!places.length || !location.country || !types.length) {
+      toast.error("Choose a country, at least one state or city, and at least one business type");
       return;
     }
-    // "Miami, Florida" (or the whole state) keeps the Google Maps search unambiguous.
-    const searches = types.map((category) => ({ country: location.country, city: area, category }));
+    if (outreachMode !== "off" && schedule.mode === "local" && !schedule.days.length) {
+      toast.error("Pick at least one day in the sending schedule");
+      return;
+    }
+    // Every place x every business type. "Miami, Florida" (or the whole state) keeps the Maps search unambiguous.
+    const searches = places.flatMap((city) => types.map((category) => ({ country: location.country, city, category })));
     const created = await api<Job>("/api/scraping/jobs", {
       method: "POST",
       body: JSON.stringify({
@@ -139,6 +163,7 @@ export default function ScrapingPage() {
         outreach_daily_limit: outreachLimit,
         outreach_email_account_id: outreachAccount || undefined,
         followups,
+        schedule: scheduleForApi(schedule),
       }),
     });
     const started = await api<Job>(`/api/scraping/jobs/${created.id}/start`, { method: "POST" });
@@ -204,7 +229,26 @@ export default function ScrapingPage() {
           <Label>Lead/Job name</Label>
           <Input value={jobName} onChange={(e) => setJobName(e.target.value)} placeholder="New York HVAC Leads" />
         </div>
-        <LocationPicker value={location} onChange={setLocation} />
+        <LocationPicker value={location} onChange={setLocation} onPick={addArea} />
+        <div className="-mt-2 flex flex-wrap items-center gap-2">
+          {areas.map((area) => (
+            <button
+              key={area}
+              type="button"
+              className="rounded-full border border-primary bg-primary/10 px-3 py-1 text-sm"
+              onClick={() => setAreas((rows) => rows.filter((row) => row !== area))}
+            >
+              {area} ×
+            </button>
+          ))}
+          {location.area.trim() ? (
+            <Button type="button" variant="secondary" onClick={() => { addArea(location.area); setLocationState({ ...location, area: "" }); }}>
+              Add &quot;{location.area.trim()}&quot;
+            </Button>
+          ) : null}
+          {!areas.length ? <span className="text-xs text-muted">No places yet: pick one above or from the suggestions.</span> : null}
+        </div>
+        <CitySuggestions country={location.country} selected={areas} onAdd={addArea} />
         <div>
           <Label>Business types</Label>
           <div className="mt-1 flex flex-wrap gap-2">
@@ -256,6 +300,7 @@ export default function ScrapingPage() {
         {outreachMode !== "off" ? (
           <div className="space-y-2">
             <SendFrom className="max-w-md" value={outreachAccount} onChange={setOutreachAccount} />
+            <SchedulePicker country={location.country} areas={areas} value={schedule} onChange={setSchedule} windowLabel={windowLabel} />
             <label className="flex items-start gap-2 text-sm">
               <input type="checkbox" className="mt-1" checked={followups} onChange={(e) => setFollowups(e.target.checked)} />
               <span>

@@ -2,13 +2,37 @@ from datetime import datetime
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class ScrapingSearchIn(BaseModel):
     country: str = Field(min_length=1, max_length=128)
     city: str = Field(min_length=1, max_length=255)
     category: str = Field(min_length=1, max_length=255)
+
+
+class ScheduleIn(BaseModel):
+    """When automatic emails go out. "local": these days and hours in each lead's own time zone;
+    "global": your sending hours (AI & settings). start_at: nothing goes out before this moment."""
+
+    mode: Literal["local", "global"] = "local"
+    days: list[int] = Field(default_factory=lambda: [1, 2, 3])  # Monday = 0 ... Sunday = 6
+    start: int = Field(default=9, ge=0, le=23)
+    end: int = Field(default=11, ge=1, le=24)
+    start_at: datetime | None = None
+
+    @field_validator("days")
+    @classmethod
+    def valid_days(cls, value: list[int]) -> list[int]:
+        days = sorted({d for d in value if 0 <= d <= 6})
+        if not days:
+            raise ValueError("Pick at least one day to send on")
+        return days
+
+    def as_dict(self) -> dict:
+        data = self.model_dump()
+        data["start_at"] = self.start_at.isoformat() if self.start_at else None
+        return data
 
 
 class ScrapingJobCreate(BaseModel):
@@ -25,6 +49,8 @@ class ScrapingJobCreate(BaseModel):
     outreach_email_account_id: str | None = None
     # Follow-ups (AI & settings -> Sending) after each first email from this file
     followups: bool = True
+    # When this file's emails go out (None: your sending hours)
+    schedule: ScheduleIn | None = None
 
 
 class OutreachAction(BaseModel):

@@ -38,7 +38,7 @@ from app.services.website_audit import (
     send_audit,
     start_audit,
 )
-from app.services.deliverability import WAITING_FOR_WINDOW, address_problem, waiting_step
+from app.services.deliverability import WAITING_FOR_SCHEDULE, WAITING_FOR_WINDOW, address_problem, waiting_step
 from app.utils.dates import local_day_start
 
 logger = get_logger("auto_audits")
@@ -384,12 +384,12 @@ def send_waiting(db: Session) -> int:
         .limit(50)
         .all()
     )
-    sent, full, closed, used = 0, set(), set(), set()
+    sent, full, used = 0, set(), set()
     for audit in waiting:
         if audit.email_account_id and audit.email_account_id in used:
             continue  # one held email per inbox per round, so a backlog doesn't go out in one burst
-        if audit.user_id in closed or audit.email_account_id in full or outreach_hold(db, audit):
-            continue  # outside sending hours, inbox full today, or its file / campaign is paused or stopped
+        if audit.email_account_id in full or outreach_hold(db, audit):
+            continue  # inbox full today, or its file / campaign is paused or stopped
         try:
             sent_audit = send_audit(db, audit.user_id, audit.id)
             sent += 1
@@ -397,10 +397,9 @@ def send_waiting(db: Session) -> int:
         except HTTPException as exc:
             db.rollback()
             if exc.status_code == 429:
-                if getattr(exc, "step", "") == WAITING_FOR_WINDOW:
-                    closed.add(audit.user_id)  # nothing of this user's sends until the hours start
-                else:
+                if getattr(exc, "step", "") not in (WAITING_FOR_WINDOW, WAITING_FOR_SCHEDULE):
                     full.add(audit.email_account_id)  # still at today's limit (or paused): try again later
+                # (sending hours / schedules are per lead: the next lead may be in another time zone)
                 held = db.get(WebsiteAudit, audit.id)
                 if held and held.step != waiting_step(exc, held.step):
                     held.step = waiting_step(exc, held.step)  # show the current reason

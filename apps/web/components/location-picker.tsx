@@ -24,7 +24,15 @@ export function searchArea(location: Location): string {
 }
 
 /** Country, then one field for a state / province / city of that country (states listed first; type to find cities). */
-export function LocationPicker({ value, onChange }: { value: Location; onChange: (next: Location) => void }) {
+export function LocationPicker({
+  value,
+  onChange,
+  onPick,
+}: {
+  value: Location;
+  onChange: (next: Location) => void;
+  onPick?: (area: string) => void; // set: a chosen place is added to a list and the field clears
+}) {
   const [countries, setCountries] = useState<Place[]>([]);
   const [options, setOptions] = useState<Place[]>([]);
   const [open, setOpen] = useState(false);
@@ -92,9 +100,16 @@ export function LocationPicker({ value, onChange }: { value: Location; onChange:
           }}
           onKeyDown={(e) => {
             if (e.key === "Escape") setOpen(false);
-            if (e.key === "Enter" && open && options[0]) {
+            if (e.key === "Enter") {
               e.preventDefault();
-              onChange({ ...value, area: options[0].label });
+              const picked = open && options[0] ? options[0].label : value.area.trim();
+              if (onPick && picked) {
+                onPick(picked);
+                onChange({ ...value, area: "" });
+                setQuery(null);
+              } else if (picked) {
+                onChange({ ...value, area: picked });
+              }
               setOpen(false);
             }
           }}
@@ -108,7 +123,13 @@ export function LocationPicker({ value, onChange }: { value: Location; onChange:
                   className="flex w-full items-center justify-between gap-2 px-3 py-1.5 text-left hover:bg-background"
                   onMouseDown={(e) => e.preventDefault()}
                   onClick={() => {
-                    onChange({ ...value, area: o.label });
+                    if (onPick) {
+                      onPick(o.label);
+                      onChange({ ...value, area: "" });
+                      setQuery(null);
+                    } else {
+                      onChange({ ...value, area: o.label });
+                    }
                     setOpen(false);
                   }}
                 >
@@ -120,7 +141,9 @@ export function LocationPicker({ value, onChange }: { value: Location; onChange:
           </ul>
         ) : null}
         <p className="mt-1 text-xs text-muted">
-          A state or province searches all of it; a city searches just that city. You can also type any town.
+          {onPick
+            ? "Pick as many states, provinces or cities as you like (or type a town and press Enter)."
+            : "A state or province searches all of it; a city searches just that city. You can also type any town."}
         </p>
       </div>
     </div>

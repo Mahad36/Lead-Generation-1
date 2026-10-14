@@ -16,6 +16,7 @@ import time
 import urllib.parse
 import urllib.request
 from datetime import UTC, date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from fastapi import HTTPException
 from sqlalchemy import func
@@ -36,6 +37,7 @@ BOUNCE_PAUSE_RATE = 0.05  # pause above 5% bounces
 WAITING_FOR_WINDOW = "Waiting: outside sending hours (sends automatically when they start)"
 WAITING_FOR_INBOX = "Waiting: the sending inbox is paused (too many bounces). Resume it in Email setup."
 WAITING_FOR_SPACING = "Waiting: spacing emails out (sends in a few minutes)"
+WAITING_FOR_SCHEDULE = "Scheduled: sends at the chosen time in the lead's time zone"
 
 # Gmail answers "421 4.4.5 Server busy" when one inbox sends emails (especially with attachments) seconds apart.
 MIN_SEND_GAP_SECONDS = 120
@@ -226,6 +228,88 @@ def require_send_window(db: Session, user_id: str) -> None:
         raise SendDeferred(
             f"Outside your sending hours ({window_label(settings)}); it sends at {opens:%a %H:%M}.",
             WAITING_FOR_WINDOW,
+        )
+
+
+# ---------------------------------------------------------------- schedule per scrape file / campaign
+#
+# A file or campaign can have its own schedule instead of your sending hours:
+#   {"mode": "local", "days": [1, 2, 3], "start": 9, "end": 11, "start_at": "2026-10-20T09:00:00+05:00"}
+# "local" = those days and hours in each lead's own time zone (from its country and state / city);
+# "global" (or no schedule) = your sending hours from AI & settings. start_at = nothing goes out before then.
+
+
+def lead_timezone(lead) -> str:
+    from app.services.markets import timezone_for
+
+    if lead is None:
+        return ""
+    return timezone_for(lead.country or "", f"{lead.city or ''} {lead.address or ''}")
+
+
+def _in_days_window(days: list[int], start: int, end: int, local: datetime) -> bool:
+    end = end % 24
+    if start == end:
+        inside, started_on = True, local
+    elif start < end:
+        inside, started_on = start <= local.hour < end, local
+    elif local.hour >= start:
+        inside, started_on = True, local
+    else:
+        inside, started_on = local.hour < end, local - timedelta(days=1)  # the night belongs to the day it began
+    return inside and started_on.weekday() in (days or [0, 1, 2, 3, 4])
+
+
+def _start_at(schedule: dict | None) -> datetime | None:
+    raw = (schedule or {}).get("start_at")
+    if not raw:
+        return None
+    try:
+        value = datetime.fromisoformat(str(raw))
+    except ValueError:
+        return None
+    return value if value.tzinfo else value.astimezone()
+
+
+def next_send_time(db: Session, user_id: str, schedule: dict | None, tz: str) -> datetime:
+    """When an automatic email under this schedule may go out (now when it may go now)."""
+    now = datetime.now(UTC)
+    start_at = _start_at(schedule)
+    probe = max(now, start_at) if start_at else now
+    if not schedule or schedule.get("mode") != "local" or not tz:
+        settings = _settings(db, user_id)
+        local = probe.astimezone()
+        return next_window_open(settings, local)
+    zone = ZoneInfo(tz)
+    local = probe.astimezone(zone)
+    days, start, end = schedule.get("days") or [1, 2, 3], int(schedule.get("start", 9)), int(schedule.get("end", 11))
+    if _in_days_window(days, start, end, local):
+        return local
+    cursor = local.replace(minute=0, second=0, microsecond=0)
+    for _ in range(24 * 8):
+        cursor += timedelta(hours=1)
+        if _in_days_window(days, start, end, cursor):
+            return cursor
+    return local
+
+
+def send_time_ok(db: Session, user_id: str, schedule: dict | None, tz: str) -> bool:
+    return next_send_time(db, user_id, schedule, tz) <= datetime.now(UTC) + timedelta(seconds=1)
+
+
+def require_send_time(db: Session, user_id: str, schedule: dict | None, lead) -> None:
+    """Automatic sends: wait for the file's / campaign's schedule (in the lead's time), else your sending hours."""
+    if not schedule or (schedule.get("mode") != "local" and not schedule.get("start_at")):
+        require_send_window(db, user_id)
+        return
+    tz = lead_timezone(lead) if schedule.get("mode") == "local" else ""
+    opens = next_send_time(db, user_id, schedule, tz)
+    if opens > datetime.now(UTC) + timedelta(seconds=1):
+        where = f" ({opens:%a %H:%M} their time)" if tz else ""
+        mine = opens.astimezone()
+        raise SendDeferred(
+            f"Scheduled: this email goes out {mine:%a %d %b %H:%M} your time{where}.",
+            WAITING_FOR_SCHEDULE,
         )
 
 

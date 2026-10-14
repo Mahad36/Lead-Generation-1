@@ -3,6 +3,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
+from app.schemas.scraping import ScheduleIn
+
 
 class CampaignCreate(BaseModel):
     name: str = Field(min_length=1, max_length=255)
@@ -29,10 +31,12 @@ class CampaignCreate(BaseModel):
     # "audit": analyse each lead's website -> PDF audit -> Claude email written from the findings -> send with PDF.
     # "template": one subject/body for every lead (with an optional AI paragraph), no website analysis.
     outreach_mode: Literal["audit", "template"] = "template"
-    # Add the signature from Settings under each email (audit emails, and template emails without {{signature}}).
+    # Add the sending Gmail's own signature (read from Gmail) under each email.
     add_signature: bool = True
     # Follow-ups (AI & settings -> Sending) after each first email of this campaign
     followups: bool = True
+    # When this campaign's emails go out (None: your sending hours)
+    schedule: ScheduleIn | None = None
 
     @model_validator(mode="after")
     def require_leads_or_import(self):

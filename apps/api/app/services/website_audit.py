@@ -34,7 +34,12 @@ from app.services.audit import write_audit
 from app.services.audit_ai import generate_audit_email, generate_audit_report
 from app.services.audit_pdf import build_audit_pdf, pdf_filename
 from app.services.crawler import crawl_website
-from app.services.deliverability import WAITING_FOR_INBOX, WAITING_FOR_SPACING, WAITING_FOR_WINDOW
+from app.services.deliverability import (
+    WAITING_FOR_INBOX,
+    WAITING_FOR_SCHEDULE,
+    WAITING_FOR_SPACING,
+    WAITING_FOR_WINDOW,
+)
 from app.services.gmail import EmailAttachment, GmailSendError, daily_limit_reached, send_gmail_message
 from app.services.integrations import resolve_ai_config
 from app.services.performance import PerformanceBlockedError, PerformanceError, measure_performance
@@ -69,7 +74,7 @@ STEP_LABELS = {
 ACTIVE_STATUSES = {"queued", *STEPS, "sending"}
 WAITING_FOR_LIMIT = "Waiting: daily send limit reached (sends automatically when allowed)"
 # Every reason an automatic send waits; auto_audits.send_waiting retries them all
-WAITING_STEPS = (WAITING_FOR_LIMIT, WAITING_FOR_WINDOW, WAITING_FOR_INBOX, WAITING_FOR_SPACING)
+WAITING_STEPS = (WAITING_FOR_LIMIT, WAITING_FOR_WINDOW, WAITING_FOR_INBOX, WAITING_FOR_SPACING, WAITING_FOR_SCHEDULE)
 SENDABLE_STATUSES = {"ready", "send_failed", "sent"}
 STALE_AFTER = timedelta(minutes=20)
 
@@ -776,6 +781,25 @@ def _html_to_text(html: str) -> str:
     return text
 
 
+def audit_schedule(db: Session, audit: WebsiteAudit) -> dict | None:
+    """The sending schedule of the scrape file / campaign this audit belongs to (None: your sending hours)."""
+    try:
+        if audit.trigger == "campaign":
+            from app.services.campaigns import campaign_for_audit
+
+            campaign = campaign_for_audit(db, audit)
+            return (campaign.extra or {}).get("schedule") if campaign else None
+        if audit.trigger == "auto":
+            from app.models import ScrapingJob
+
+            lead = db.get(Lead, audit.lead_id)
+            job = db.get(ScrapingJob, lead.scraping_job_id) if lead and lead.scraping_job_id else None
+            return (job.extra or {}).get("schedule") if job else None
+    except Exception as exc:  # bookkeeping must never block a send
+        logger.warning("schedule_lookup_failed", audit_id=audit.id, error=str(exc))
+    return None
+
+
 def _followups_for(db: Session, audit: WebsiteAudit, settings: UserSettings | None) -> bool:
     """Follow-ups after this audit email: the setting, and the campaign's / scrape file's own switch."""
     if settings is not None and not settings.followups_enabled:
@@ -845,7 +869,8 @@ def send_audit(
     if problem:
         raise HTTPException(status_code=400, detail=problem)
     if not manual:
-        deliverability.require_send_window(db, user_id)
+        # The file's / campaign's own schedule in the lead's time zone, else your sending hours
+        deliverability.require_send_time(db, user_id, audit_schedule(db, audit), lead)
     # The chosen inbox, or (none chosen / "" = automatic) the connected inbox with the most room today
     account: EmailAccount = deliverability.sending_account(
         db,

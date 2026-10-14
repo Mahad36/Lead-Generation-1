@@ -278,6 +278,9 @@ def create_campaign(db: Session, user_id: str, data: CampaignCreate, meta: dict)
         "followups": data.followups,
         # No inbox chosen: each email goes from the connected inbox with the most room today
         "rotate": not data.email_account_id,
+        "schedule": data.schedule.as_dict() if data.schedule else None,
+        # Template campaigns send in one batch: their schedule follows the leads' most common time zone
+        "timezone": _main_timezone(leads),
     }
     if data.scheduled_at:
         extra["scheduled_at"] = data.scheduled_at.isoformat()
@@ -1073,6 +1076,15 @@ def advance_audit_campaign(db: Session, campaign: Campaign) -> tuple[str, int | 
 
 CAMPAIGN_PAUSED_STEP = "Waiting: the campaign is paused (sends when it resumes)"
 CAMPAIGN_STOPPED_STEP = "Ready: the campaign was stopped, so this email was not sent"
+
+
+def _main_timezone(leads: list[Lead]) -> str:
+    from collections import Counter
+
+    from app.services.deliverability import lead_timezone
+
+    zones = Counter(tz for tz in (lead_timezone(lead) for lead in leads) if tz)
+    return zones.most_common(1)[0][0] if zones else ""
 
 
 def campaign_for_audit(db: Session, audit) -> Campaign | None:

@@ -36,3 +36,4 @@ httpx==0.28.1
 factory-boy==3.3.1
 freezegun==1.5.1
 respx==0.22.0
+tzdata>=2024.1  # time zones on Windows (lead-local sending schedules)

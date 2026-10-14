@@ -129,11 +129,13 @@ def process_campaign_queue(campaign_id: str) -> dict:
             if delay is not None:
                 _continue_queue(campaign_id, delay)
             return {"status": result}
-        from app.services.deliverability import seconds_until_window
+        from app.services.deliverability import next_send_time
 
-        wait = seconds_until_window(db, campaign.user_id)
+        schedule = (campaign.extra or {}).get("schedule")
+        tz = (campaign.extra or {}).get("timezone", "") if schedule and schedule.get("mode") == "local" else ""
+        wait = max(int((next_send_time(db, campaign.user_id, schedule, tz) - datetime.now(UTC)).total_seconds()), 0)
         if wait:
-            # Outside your sending hours: carry on when they start
+            # Before the campaign's schedule (or outside your sending hours): carry on when it opens
             _continue_queue(campaign_id, wait + 5)
             return {"status": "waiting_for_sending_hours"}
         claimed = claim_next_campaign_lead(db, campaign_id, worker_id)
