@@ -22,6 +22,7 @@ type Finding = {
 
 export type Audit = Tracking & {
   id: string;
+  sent_from?: string; // the inbox the email went from (Website audits list)
   lead_id: string;
   status: string;
   step: string;

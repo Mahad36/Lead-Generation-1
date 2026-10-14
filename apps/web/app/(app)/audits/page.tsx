@@ -224,6 +224,7 @@ export default function WebsiteAuditsPage() {
                   <th className="py-2 pr-3">Customer</th>
                   <th className="py-2 pr-3">Platform</th>
                   <th className="py-2 pr-3">Status</th>
+                  <th className="py-2 pr-3">Sent from</th>
                   <th className="py-2 pr-3">Score</th>
                   <th className="py-2 pr-3">Started</th>
                   <th className="py-2" />
@@ -241,6 +242,7 @@ export default function WebsiteAuditsPage() {
                         <TrackingBadges t={a} sent={Boolean(a.sent_at)} />
                       </span>
                     </td>
+                    <td className="py-2 pr-3 whitespace-nowrap">{a.sent_from || "—"}</td>
                     <td className="py-2 pr-3">{a.overall_score ?? "—"}</td>
                     <td className="py-2 pr-3">{formatDate(a.created_at)}</td>
                     <td className="space-x-3 py-2 text-right whitespace-nowrap">

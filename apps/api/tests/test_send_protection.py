@@ -549,3 +549,20 @@ def test_delay_validation():
     assert validate_send_limits(30, 30, 180, 420)[2:] == (180, 420)
     assert validate_send_limits(30, 30, 5000, 9000)[2:] == (3600, 3600)
     assert validate_send_limits(30, 30, 400, 100)[2:] == (400, 400)
+
+
+def test_automatic_audits_are_not_pinned_to_the_default_inbox(db, monkeypatch):
+    """Regression: every scrape-file audit used to get the default inbox fixed at creation, so all emails went
+    from one inbox and rotation never ran."""
+    from app.models import Lead
+    from app.services import scraping_jobs, website_audit
+
+    monkeypatch.setattr(scraping_jobs, "enqueue_task", lambda *a, **k: "inline")
+    user = make_user(db)
+    make_account(db, user, "ahad@beecreative.pk", is_default=True)
+    make_account(db, user, "hashir@beecreative.pk")
+    lead = Lead(user_id=user.id, business_name="Smile", primary_email="info@smile.com", website_url="https://smile.com")
+    db.add(lead)
+    db.commit()
+    audit = website_audit.start_audit(db, user.id, lead.id, auto_send=True, trigger="auto")
+    assert audit.email_account_id is None  # rotation picks the inbox when the email is sent

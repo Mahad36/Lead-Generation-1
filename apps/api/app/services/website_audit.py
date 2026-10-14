@@ -386,7 +386,12 @@ def start_audit(
     if auto_send:
         if not recipient:
             raise HTTPException(status_code=400, detail="Add the customer's email address to send automatically.")
-        email_account_id = resolve_email_account(db, user_id, email_account_id).id
+        if email_account_id:
+            email_account_id = resolve_email_account(db, user_id, email_account_id).id
+        else:
+            # No inbox chosen: none is fixed now; rotation picks one when the email is sent (just check one exists)
+            resolve_email_account(db, user_id, None)
+            email_account_id = None
     elif email_account_id:
         email_account_id = resolve_email_account(db, user_id, email_account_id, require_connected=False).id
 

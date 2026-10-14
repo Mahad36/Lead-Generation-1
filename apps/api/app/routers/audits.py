@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.deps import get_client_meta, get_current_user
-from app.models import Lead, User
+from app.models import EmailAccount, Lead, User
 from app.schemas.audits import AuditDraftUpdate, AuditSendRequest, AuditStart, QuickAuditRequest
 from app.services import website_audit as audit_service
 
@@ -77,10 +77,18 @@ def list_audits(
     platforms = (
         dict(db.query(Lead.id, Lead.platform).filter(Lead.id.in_(lead_ids)).all()) if lead_ids else {}
     )
+    # The inbox each email went from (rotation picks it when sending; set on the audit then)
+    account_ids = {a.email_account_id for a in audits if a.email_account_id and a.sent_at}
+    senders = (
+        dict(db.query(EmailAccount.id, EmailAccount.email_address).filter(EmailAccount.id.in_(account_ids)).all())
+        if account_ids
+        else {}
+    )
     items = []
     for a in audits:
         data = audit_service.serialize_audit(a, full=False)
         data["platform"] = data.get("platform") or platforms.get(a.lead_id) or ""
+        data["sent_from"] = senders.get(a.email_account_id, "") if a.sent_at else ""
         items.append(data)
     if not page:
         return items
