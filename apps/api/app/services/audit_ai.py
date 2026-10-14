@@ -205,10 +205,16 @@ checks, each with a status and evidence (page URL + what was observed). Use them
   the screenshots: what you observed, the platform-native way to improve it (its built-in features, apps or
   plugins), and the possible business benefit, without guarantees (no promised revenue, rankings or conversions).
   For "not_detected" items, phrase the wording as a question to confirm ("worth checking whether..."), never as a
-  fact. If the platform is Unknown or Custom-built, base them on what was observed only, with no platform-specific
-  claims. Empty list only if nothing is supported by evidence.
+  fact. Name the platform and the exact native feature, setting, app or plugin in each recommendation (e.g.
+  "In Elementor, set Motion Effects > Entrance Animation to None", "Shopify's built-in product reviews app"), and use
+  the detected add-ons (page builder, forms, booking, reviews, caching plugins) where they are relevant.
+  Custom-built sites: use the detected stack and builder (e.g. ASP.NET, a web agency named in secondary
+  technologies) and phrase each as a concrete change to ask their developer or agency for, with no claims about a
+  CMS they don't use. Unknown platform: base them on what was observed only. Empty list only if nothing is
+  supported by evidence.
 - outreach_angle: 2-3 sentences for a cold email, from the strongest confirmed_missing or improvement item:
-  a specific observation (naming the page or area), the platform-specific opportunity, a possible benefit in
+  a specific observation (naming the page or area), the platform-specific opportunity (naming the platform and its
+  native feature when the platform is known), a possible benefit in
   cautious wording ("may help", "could make it easier"), and a natural opening for a conversation. Never base it on
   a not_detected item stated as fact.
 """ + HUMAN_STYLE
@@ -216,8 +222,13 @@ checks, each with a status and evidence (page URL + what was observed). Use them
 EMAIL_SYSTEM = """You write short cold emails that a real person would write, sent with a website audit PDF.
 Rules:
 - When audit.outreach_angle is given, build the opening on it (it is the strongest verified observation,
-  possibly edited by the sender); you may mention the platform (e.g. "your Shopify store"). Never present something
-  the audit only "couldn't detect" as a fact, and never promise results.
+  possibly edited by the sender). Never present something the audit only "couldn't detect" as a fact, and never
+  promise results.
+- Platform: when audit.platform is a named platform (anything except "", "Unknown" and "Custom-built"), include
+  exactly one natural sentence with a platform-specific point taken from audit.platform_opportunities (or the
+  outreach angle), naming the platform and the native way to fix it, e.g. "Since the site runs on WordPress with
+  Elementor, switching off the entrance animations on mobile is a five-minute change." For "Custom-built", you may
+  say it is a small change for their developer. Never invent a platform detail that isn't in the audit.
 - Start with "Hi <recipient_business.greeting_name>," when greeting_name is given (the owner / the person it goes
   to); otherwise start with exactly "Hi there,". Never greet the business name or "team".
 - Open with one specific thing you noticed on their site (from the audit), not with who you are.

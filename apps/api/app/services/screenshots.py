@@ -30,7 +30,8 @@ class ScreenshotError(RuntimeError):
 
 
 def capture_screenshots(url: str, out_dir: str) -> dict:
-    """Returns {"desktop": [png paths], "mobile": [png paths]} (first screen first)."""
+    """Returns {"desktop": [png paths], "mobile": [png paths]} (first screen first), plus "_page": the HTML the real
+    browser rendered and the response headers (desktop), for platform detection on sites that block plain fetches."""
     try:
         from playwright.sync_api import Error as PlaywrightError
         from playwright.sync_api import sync_playwright
@@ -39,7 +40,7 @@ def capture_screenshots(url: str, out_dir: str) -> dict:
 
     folder = Path(out_dir)
     folder.mkdir(parents=True, exist_ok=True)
-    result: dict[str, list[str]] = {}
+    result: dict = {}
     try:
         with sync_playwright() as pw:
             browser = pw.chromium.launch(args=["--no-sandbox", "--disable-dev-shm-usage"])
@@ -54,12 +55,22 @@ def capture_screenshots(url: str, out_dir: str) -> dict:
                         locale="en-US",
                     )
                     page = context.new_page()
+                    response = None
                     try:
-                        page.goto(url, wait_until="load", timeout=NAV_TIMEOUT_MS)
+                        response = page.goto(url, wait_until="load", timeout=NAV_TIMEOUT_MS)
                     except PlaywrightError:
                         # Slow third-party assets: take what has rendered so far.
                         page.wait_for_timeout(SETTLE_MS)
                     page.wait_for_timeout(SETTLE_MS)
+                    if not device["mobile"] and "_page" not in result:
+                        try:
+                            result["_page"] = {
+                                "html": page.content()[:600000],
+                                "headers": dict(response.headers) if response else {},
+                                "status": response.status if response else None,
+                            }
+                        except PlaywrightError:
+                            pass
                     height = device["viewport"]["height"]
                     page_height = page.evaluate("document.documentElement.scrollHeight") or height
                     screens = max(1, min(SCREENS_PER_DEVICE, -(-int(page_height) // height)))

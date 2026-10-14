@@ -5,11 +5,15 @@ platform scores points per matching signal; the best score is the primary platfo
 can be several things at once (WooCommerce on WordPress), so the other matches and add-on technologies (review apps,
 email tools, analytics, page builders...) are returned separately as secondary technologies.
 
-Nothing is guessed: a page with no platform signature is "Unknown" (or "Custom-built" when a web framework such
-as Next.js is clearly visible). Confidence: High >= 0.8, Medium >= 0.5, Low > 0, Unknown = 0.
+Nothing is guessed. A readable page with no CMS / builder signature is "Custom-built", with the technology it shows
+(a web framework such as Next.js, or a server stack such as ASP.NET or PHP) and who built it when the page credits a
+web agency. A page that names its generator (<meta name="generator">) gets that name. "Unknown" is left for pages
+that couldn't be read (blocked, empty). Confidence: High >= 0.8, Medium >= 0.5, Low > 0, Unknown = 0.
 """
 
 from __future__ import annotations
+
+import re
 
 from dataclasses import dataclass, field
 
@@ -79,7 +83,51 @@ FINGERPRINTS: list[tuple[str, str, list[tuple[str, int]]]] = [
     ("framer", "Framer", [("framerusercontent.com", 40), ("framer.com", 25), ('generator" content="framer', 40)]),
     ("jimdo", "Jimdo", [("jimdo", 35), ("jimcdn.com", 35)]),
     ("ecwid", "Ecwid", [("app.ecwid.com", 40), ("ecwid", 30)]),
+    # More site builders (asset hosts / generator tags, not words that could appear in page text)
+    ("strikingly", "Strikingly", [("strikinglycdn.com", 40), ('generator" content="strikingly', 40)]),
+    ("carrd", "Carrd", [("carrd.co", 35), ('generator" content="carrd', 40)]),
+    ("tilda", "Tilda", [("tildacdn.com", 40), ('generator" content="tilda', 40)]),
+    ("webnode", "Webnode", [("webnode.page", 35), ("webnode.com", 30), ('generator" content="webnode', 40)]),
+    ("google_sites", "Google Sites", [("sites.google.com", 30), ("gstatic.com/atari", 40)]),
+    ("hostinger", "Hostinger Website Builder", [("zyrosite.com", 40), ("userapp.zyrosite", 40), ("zyro", 20)]),
+    ("site123", "SITE123", [("site123.me", 35), ("cdn-cms.f-static", 30), ("site123", 20)]),
+    ("leadpages", "Leadpages", [("lpages.co", 40), ("leadpages", 30)]),
+    ("unbounce", "Unbounce", [("unbounce.com", 35), ("ubembed", 30)]),
+    ("clickfunnels", "ClickFunnels", [("clickfunnels.com", 40), ("cfimg.com", 30)]),
+    ("kajabi", "Kajabi", [("kajabi-cdn.com", 40), ("kajabi-storefronts", 35)]),
+    ("thinkific", "Thinkific", [("thinkific.com", 35), ("thinkific-", 25)]),
+    ("bubble", "Bubble", [("cdn.bubble.io", 40), ('generator" content="bubble', 40)]),
+    ("mobirise", "Mobirise", [('generator" content="mobirise', 40), ("mobirise", 25)]),
+    ("yola", "Yola", [("yola.com", 30), ("yolacdn", 35)]),
+    ("hibu", "Hibu", [("hibu.com", 30), ("hibusites", 35)]),
+    ("thryv", "Thryv", [("thryv.com", 30), ("thryvsites", 35)]),
+    ("scorpion", "Scorpion", [("scorpion.co", 35), ("scorpioncms", 40)]),
+    # Website platforms for dental / medical practices
+    ("prosites", "ProSites", [("prosites.com", 35), ("prositescdn", 40), ("pscdn.net", 30)]),
+    ("officite", "Officite", [("officite.com", 35), ("officite", 25)]),
+    ("pbhs", "PBHS", [("pbhs.com", 35), ("pbhsinc", 30)]),
+    ("sesame", "Sesame Communications", [("sesamecommunications.com", 40), ("sesamehub", 30)]),
+    ("patientpop", "PatientPop / Tebra", [("patientpop.com", 40), ("ppopcdn", 35), ("tebra.com", 30)]),
+    ("dentalqore", "DentalQore", [("dentalqore", 40)]),
 ]
+
+# Server-side stacks: what a custom-built site runs on (needle, name)
+STACKS: list[tuple[str, str]] = [
+    ("__viewstate", "ASP.NET"), ("x-aspnet-version", "ASP.NET"), ("x-powered-by:asp.net", "ASP.NET"),
+    ("asp-append-version", "ASP.NET Core"), ("aspnetcdn.com", "ASP.NET"), (".aspx", "ASP.NET"),
+    ("server:microsoft-iis", "Microsoft IIS"), ("x-powered-by:php", "PHP"), (".php", "PHP"),
+    ('name="csrf-param" content="authenticity_token"', "Ruby on Rails"), ("x-powered-by:next.js", "Next.js"),
+    ("bootstrap.min.css", "Bootstrap"), ("/bootstrap/", "Bootstrap"), ("tailwind", "Tailwind CSS"),
+    ("jquery", "jQuery"),
+]
+# A web agency credited on the page ("Website by Acme Digital")
+AGENCY_CREDIT = re.compile(
+    r"(?:website|site|web design|designed|developed|built|powered|created|marketing)\s+(?:and\s+\w+\s+)?by\s*:?\s*"
+    r"(?:<[^>]+>\s*)*([A-Z][\w&.'\- ]{2,40}?)\s*(?:</a>|<|\||\.|,|\n)",
+    re.I,
+)
+BLOCKED = ("cf-chl", "just a moment...", "attention required", "access denied", "verify you are human",
+           "captcha", "request unsuccessful", "incapsula", "pardon our interruption")
 
 # Web frameworks: evidence of a custom-built site when no CMS / builder matches
 FRAMEWORKS: list[tuple[str, str]] = [
@@ -119,6 +167,62 @@ ADDONS: list[tuple[str, str, str]] = [
     ("gform_", "Gravity Forms", "forms"), ("wp-rocket", "WP Rocket", "performance"), ("litespeed", "LiteSpeed Cache", "performance"),
     ("jetpack", "Jetpack", "plugins"), ("cloudflare", "Cloudflare", "cdn"),
 ]
+
+
+def readable(html: str) -> bool:
+    """A real page (not a block / challenge page or an empty shell)."""
+    text = re.sub(r"<script.*?</script>|<style.*?</style>|<[^>]+>", " ", html or "", flags=re.S | re.I)
+    words = len(text.split())
+    lower = (html or "").lower()
+    return words >= 80 and not (words < 400 and any(b in lower for b in BLOCKED))
+
+
+def agency_credit(html: str) -> str:
+    """The web agency the page credits, e.g. "Webiotic" from "Website by Webiotic" (footer)."""
+    tail = (html or "")[-20000:]
+    for match in AGENCY_CREDIT.finditer(tail):
+        name = re.sub(r"\s+", " ", match.group(1)).strip(" .-|")
+        if name and name.lower() not in {"google", "the", "our", "us", "you", "wordpress", "cloudflare"}:
+            return name
+    hosts = re.findall(r'href=["\']https?://(?:www\.)?([a-z0-9-]+)\.(?:com|net|io|agency|co|design|digital)[/"\']', tail, re.I)
+    for host in reversed(hosts[-8:]):  # a footer link to a web company ("webiotic.com")
+        if any(w in host.lower() for w in ("web", "design", "digital", "media", "studio", "creative", "marketing", "otic")):
+            if not any(s in host.lower() for s in ("facebook", "instagram", "google", "youtube", "linkedin", "twitter")):
+                return host
+    return ""
+
+
+def _no_cms(html, html_l, header_l, blob_l, frameworks, secondary, evidence) -> "DetectionResult":
+    """No CMS / builder signature: the generator it names, else custom-built (when the page was readable)."""
+    generator = re.search(r'<meta[^>]+name=["\']generator["\'][^>]+content=["\']([^"\']{2,60})["\']', html, re.I) or re.search(
+        r'<meta[^>]+content=["\']([^"\']{2,60})["\'][^>]+name=["\']generator["\']', html, re.I
+    )
+    if generator:
+        name = re.split(r"\s+v?\d", generator.group(1).strip())[0].strip()
+        if name:
+            conf = 0.7
+            evidence.append({"signal": f'generator meta "{generator.group(1)}"', "source": "html", "platform": name})
+            tech = [{"name": name, "confidence": conf, "signals": ["generator meta"], "is_primary_platform": True}]
+            return DetectionResult(name, conf, ["generator meta"], tech, confidence_label(conf), secondary, evidence)
+    stack = []
+    for needle, name in STACKS:
+        if needle in (header_l if needle.startswith(("x-", "server:")) else blob_l) and name not in stack:
+            stack.append(name)
+    if not frameworks and not readable(html):
+        # Couldn't read the page (blocked or empty): don't guess
+        return DetectionResult("Unknown", 0.0, [], [], "Unknown", secondary, evidence)
+    built_by = agency_credit(html)
+    signals = frameworks + [s for s in stack if s not in frameworks]
+    conf = 0.6 if frameworks or {"ASP.NET", "ASP.NET Core", "Ruby on Rails"} & set(stack) else 0.5
+    for name in reversed(signals):
+        secondary.insert(0, {"name": name, "category": "framework", "signals": [name]})
+    evidence += [{"signal": f"{name}", "source": "html", "platform": "Custom-built"} for name in signals]
+    evidence.append({"signal": "no CMS or site-builder signature on a readable page", "source": "html", "platform": "Custom-built"})
+    if built_by:
+        secondary.insert(0, {"name": f"Built by {built_by}", "category": "agency", "signals": ["footer credit"]})
+        evidence.append({"signal": f"credits {built_by}", "source": "html", "platform": "Custom-built"})
+    tech = [{"name": "Custom-built", "confidence": conf, "signals": signals, "is_primary_platform": True}]
+    return DetectionResult("Custom-built", conf, signals, tech, confidence_label(conf), secondary, evidence)
 
 
 def confidence_label(confidence: float) -> str:
@@ -169,15 +273,7 @@ def detect_platform(
     frameworks = sorted({name for needle, name in FRAMEWORKS if needle in blob_l})
 
     if not scores:
-        if frameworks:
-            conf = 0.6
-            tech = [{"name": "Custom-built", "confidence": conf, "signals": frameworks, "is_primary_platform": True}]
-            for name in frameworks:
-                secondary.insert(0, {"name": name, "category": "framework", "signals": [name]})
-            evidence += [{"signal": f"{name} framework", "source": "html", "platform": "Custom-built"} for name in frameworks]
-            return DetectionResult("Custom-built", conf, frameworks, tech, confidence_label(conf), secondary, evidence)
-        # No CMS / builder / framework signature: possibly custom-built, but not confirmed
-        return DetectionResult("Unknown", 0.0, [], [], "Unknown", secondary, evidence)
+        return _no_cms(html or "", html_l, header_l, blob_l, frameworks, secondary, evidence)
 
     ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
     raw_platform, raw = ranked[0]

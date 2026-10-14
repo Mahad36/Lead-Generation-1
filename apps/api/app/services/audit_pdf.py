@@ -504,6 +504,67 @@ def _wrap_lines(text: str, font: str, size: float, max_w: float) -> list[str]:
     return lines + ([line] if line else [])
 
 
+PLATFORM_STATUS = {
+    "confirmed_missing": ("Missing", colors.HexColor("#DC2626")),
+    "improvement": ("Improve", colors.HexColor("#D97706")),
+    "manual_review": ("Worth checking", colors.HexColor("#2563EB")),
+    "not_detected": ("Worth checking", colors.HexColor("#2563EB")),
+}
+
+
+def platform_intro(platform: dict) -> str:
+    """One paragraph: what the site runs on and why that matters for the fixes."""
+    name = platform.get("name") or ""
+    addons = platform.get("addons") or []
+    built_by = platform.get("built_by") or ""
+    with_ = f" with {', '.join(addons[:-1]) + ' and ' + addons[-1] if len(addons) > 1 else addons[0]}" if addons else ""
+    if name == "Custom-built":
+        by = f" by {built_by}" if built_by else ""
+        return (
+            f"Your website is custom-built{by}{with_}, not on a ready-made platform. That means every change goes "
+            "through your developer, so the suggestions below are written as clear, small requests you can pass on."
+        )
+    if not name or name == "Unknown":
+        return ("We couldn't confirm which platform your website runs on, so these suggestions are based only on what "
+                "we saw on the site.")
+    return (
+        f"Your website runs on {name}{with_}. The suggestions below use what {name} and those tools already offer, "
+        "so most of them are settings or small changes rather than a rebuild."
+    )
+
+
+def _platform_block(item: dict, platform_name: str, styles) -> KeepTogether:
+    label, color = PLATFORM_STATUS.get(item.get("status", ""), ("Improve", colors.HexColor("#D97706")))
+    how = "How to do it" + (f" on {platform_name}" if platform_name and platform_name not in ("Unknown", "Custom-built") else "")
+    if platform_name == "Custom-built":
+        how = "What to ask your developer"
+    body = [
+        Paragraph(_safe(item.get("title")), styles["finding_title"]),
+        Spacer(1, 4),
+        Table([[Tag(label, color)]], hAlign="LEFT", style=TableStyle([("LEFTPADDING", (0, 0), (-1, -1), 0),
+              ("TOPPADDING", (0, 0), (-1, -1), 0), ("BOTTOMPADDING", (0, 0), (-1, -1), 0)])),
+        Spacer(1, 6),
+        Paragraph(f"<b>What I saw:</b> {_safe(item.get('evidence'))}", styles["body"]),
+        Spacer(1, 3),
+        Paragraph(f"<b>{how}:</b> {_safe(item.get('recommendation'))}", styles["body"]),
+    ]
+    if item.get("business_relevance"):
+        body += [Spacer(1, 3), Paragraph(f"<b>Why it matters:</b> {_safe(item.get('business_relevance'))}", styles["body"])]
+    block = Table([["", body]], colWidths=[4, CONTENT_W - 4])
+    block.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (0, 0), YELLOW),
+        ("BACKGROUND", (1, 0), (1, 0), PANEL),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (0, 0), 0),
+        ("RIGHTPADDING", (0, 0), (0, 0), 0),
+        ("LEFTPADDING", (1, 0), (1, 0), 12),
+        ("RIGHTPADDING", (1, 0), (1, 0), 12),
+        ("TOPPADDING", (0, 0), (-1, -1), 10),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 11),
+    ]))
+    return KeepTogether([block, Spacer(1, 10)])
+
+
 def build_audit_pdf(
     *,
     report: dict,
@@ -513,7 +574,9 @@ def build_audit_pdf(
     generated_at: datetime,
     ai_model: str = "",
     screenshots: dict | None = None,
+    platform: dict | None = None,
 ) -> bytes:
+    """platform: {"name", "confidence_label", "addons": [...], "built_by"} for the "Your Website Platform" section."""
     f = _fonts()
     styles = _styles()
     buffer = io.BytesIO()
@@ -702,6 +765,15 @@ def build_audit_pdf(
     if findings:
         story += [PageBreak(), PillHeading("What I Found")]
         story += [_finding_block(item, styles) for item in findings]
+
+    # ---- Your website platform: what it runs on, and platform-native fixes
+    opportunities = [o for o in report.get("platform_opportunities") or [] if o.get("title") and o.get("recommendation")]
+    platform = platform or {}
+    platform_name = platform.get("name") or report.get("platform") or ""
+    if opportunities or (platform_name and platform_name != "Unknown"):
+        story += [CondPageBreak(90 * mm), PillHeading("Your Website Platform"),
+                  Paragraph(_safe(platform_intro({**platform, "name": platform_name})), styles["body"]), Spacer(1, 10)]
+        story += [_platform_block(item, platform_name, styles) for item in opportunities[:5]]
 
     # ---- What works + action plan
     strengths = report.get("strengths") or []

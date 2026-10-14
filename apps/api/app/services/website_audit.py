@@ -482,6 +482,23 @@ def _collect_site_data(lead: Lead, url: str) -> dict:
     }
 
 
+def _redetect_platform(site: dict, url: str, page: dict, log) -> dict:
+    """The plain fetch couldn't tell the platform (e.g. a firewall served a challenge page): detect it again from the
+    page the real browser rendered, and keep that when it is more certain."""
+    if (site.get("platform_confidence") or 0) >= 0.5 and site.get("platform") not in ("", "Unknown"):
+        return site
+    detection = detect_platform(html=page.get("html") or "", headers=page.get("headers") or {}, url=url)
+    if detection.platform_name == "Unknown" or detection.confidence <= (site.get("platform_confidence") or 0):
+        return site
+    log.info("platform_redetected_from_browser", platform=detection.platform_name, confidence=detection.confidence)
+    return site | {
+        "platform": detection.platform_name,
+        "platform_confidence": detection.confidence,
+        "technologies": [t["name"] for t in detection.technologies][:15],
+        "platform_intel": platform_intelligence(url, [(url, page.get("html") or "")], detection, page.get("status") or 200),
+    }
+
+
 def platform_intelligence(url: str, pages: list[tuple[str, str]], detection, home_status: int | None = None) -> dict:
     """Detected platform (with confidence, add-ons and evidence) and the evidence-based feature checks.
     Never fails the audit: a problem is recorded and the audit carries on."""
@@ -575,6 +592,32 @@ def _saved_screenshots(audit_id: str) -> dict:
     }
 
 
+PDF_VERSION = 2  # 2: the "Your Website Platform" section
+
+# Add-ons worth naming to the business owner (not analytics / CDN plumbing)
+PDF_ADDON_CATEGORIES = ("platform", "page_builder", "forms", "booking", "reviews", "email", "performance",
+                        "seo", "chat", "recommendations", "subscriptions", "framework")
+
+
+def pdf_platform(audit: WebsiteAudit) -> dict:
+    """What the PDF says about the platform: its name, notable add-ons and the agency that built it."""
+    site = audit.site_data or {}
+    intel = site.get("platform_intel") or {}
+    secondary = intel.get("secondary") or []
+    addons, built_by = [], ""
+    for item in secondary:
+        if item.get("category") == "agency":
+            built_by = (item.get("name") or "").removeprefix("Built by ").strip()
+        elif item.get("category") in PDF_ADDON_CATEGORIES and item.get("name") not in addons:
+            addons.append(item["name"])
+    return {
+        "name": audit.platform or intel.get("primary") or site.get("platform") or "",
+        "confidence_label": intel.get("confidence_label") or "",
+        "addons": addons[:5],
+        "built_by": built_by,
+    }
+
+
 def _build_pdf(audit: WebsiteAudit, lead: Lead, sender: dict, screenshots: dict) -> None:
     generated_at = datetime.now(UTC)
     pdf = build_audit_pdf(
@@ -585,8 +628,10 @@ def _build_pdf(audit: WebsiteAudit, lead: Lead, sender: dict, screenshots: dict)
         generated_at=generated_at,
         ai_model=audit.ai_model if audit.ai_provider in {"anthropic", "claude_code"} else "",
         screenshots=screenshots,
+        platform=pdf_platform(audit),
     )
     audit.pdf_data = pdf
+    audit.site_data = {**(audit.site_data or {}), "pdf_version": PDF_VERSION}
     audit.pdf_size = len(pdf)
     audit.pdf_filename = pdf_filename(lead.business_name, generated_at)
     audit.generated_at = generated_at
@@ -641,6 +686,9 @@ def run_audit(db: Session, audit_id: str) -> str:
             # The audit still runs on the measured data; the report says the visual review was skipped.
             log.warning("audit_screenshots_skipped", error=str(exc))
             site["screenshot_error"] = str(exc)
+        browser_page = screenshots.pop("_page", None)
+        if browser_page:
+            site = _redetect_platform(site, audit.website_url, browser_page, log)
         audit.site_data = site | {"screenshots": {k: len(v) for k, v in screenshots.items()}}
         db.commit()
         images = screenshots.get("desktop", []) + screenshots.get("mobile", [])
@@ -1059,6 +1107,15 @@ def send_audit(
         raise HTTPException(status_code=400, detail="Add the customer's email address first.")
     if not subject or not (body_html or "").strip():
         raise HTTPException(status_code=400, detail="The email subject and body are required.")
+    if audit.pdf_data and lead and (audit.site_data or {}).get("pdf_version", 1) < PDF_VERSION:
+        # Made before the current PDF layout (e.g. without "Your Website Platform"): rebuilt from the stored audit,
+        # no new analysis (no Claude tokens)
+        try:
+            _build_pdf(audit, lead, _sender_info(db, user_id, audit), _saved_screenshots(audit.id))
+            db.commit()
+        except Exception as exc:  # the earlier PDF still goes out
+            db.rollback()
+            logger.warning("pdf_rebuild_failed", audit_id=audit.id, error=str(exc)[:200])
     pdf = audit.pdf_data
     if not pdf:
         raise HTTPException(status_code=400, detail="The PDF audit is missing. Run the audit again.")
