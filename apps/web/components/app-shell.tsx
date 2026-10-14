@@ -4,6 +4,7 @@ import { api, authApi } from "@/lib/api";
 import { clearTokens, getRefreshToken, isAuthenticated } from "@/lib/auth";
 import { cn } from "@/lib/utils";
 import {
+  Bell,
   FileSearch,
   FileText,
   LayoutDashboard,
@@ -14,6 +15,7 @@ import {
   Megaphone,
   Moon,
   Settings,
+  ShieldAlert,
   Sun,
   UserCheck,
   Users,
@@ -22,6 +24,7 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useTheme } from "next-themes";
 import { useEffect, useState } from "react";
+import { toast } from "sonner";
 
 const NAV = [
   { href: "/dashboard", label: "Home", icon: LayoutDashboard },
@@ -33,8 +36,34 @@ const NAV = [
   { href: "/email-templates", label: "Templates", icon: FileText },
   { href: "/campaigns", label: "Campaigns", icon: Megaphone },
   { href: "/email-accounts", label: "Email setup", icon: Mail },
+  { href: "/email-health", label: "Email health", icon: ShieldAlert },
   { href: "/settings", label: "AI & settings", icon: Settings },
 ];
+
+type HealthAlert = { id: string; severity: "warning" | "critical"; subject: string; title: string; message: string };
+type AlertSummary = { open: number; critical: number; unread: number; to_notify: HealthAlert[]; top_critical: HealthAlert | null };
+
+/** New email-health alerts: a pop-up in the app and, when allowed, a desktop notification. */
+function announce(alerts: HealthAlert[], open: (href: string) => void) {
+  for (const a of alerts.slice(0, 3)) {
+    const text = `${a.subject}: ${a.message}`;
+    const action = { label: "View", onClick: () => open("/email-health") };
+    if (a.severity === "critical") toast.error(a.title, { description: text, duration: 20_000, action });
+    else toast.warning(a.title, { description: text, duration: 12_000, action });
+    try {
+      if (typeof Notification !== "undefined" && Notification.permission === "granted") {
+        const note = new Notification(`${a.severity === "critical" ? "⚠ " : ""}${a.title}`, { body: text, tag: a.id });
+        note.onclick = () => {
+          window.focus();
+          open("/email-health");
+        };
+      }
+    } catch {
+      /* desktop notifications unavailable */
+    }
+  }
+  if (alerts.length > 3) toast.warning(`${alerts.length - 3} more email health alerts`, { action: { label: "View", onClick: () => open("/email-health") } });
+}
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
@@ -42,6 +71,28 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const { theme, setTheme } = useTheme();
   const [email, setEmail] = useState("");
   const [unread, setUnread] = useState(0);
+  const [alerts, setAlerts] = useState<AlertSummary | null>(null);
+
+  // Email health alerts: the bell, the banner and pop-ups for new ones (checked every minute).
+  useEffect(() => {
+    if (!isAuthenticated()) return;
+    const load = () =>
+      api<AlertSummary>("/api/health-alerts/summary")
+        .then((data) => {
+          setAlerts(data);
+          if (data.to_notify.length) {
+            announce(data.to_notify, (href) => router.push(href));
+            api("/api/health-alerts/notified", {
+              method: "POST",
+              body: JSON.stringify({ ids: data.to_notify.map((a) => a.id) }),
+            }).catch(() => undefined);
+          }
+        })
+        .catch(() => undefined);
+    load();
+    const timer = setInterval(load, 60_000);
+    return () => clearInterval(timer);
+  }, [pathname, router]);
 
   // Unread lead replies, shown on the "Replies" menu item.
   useEffect(() => {
@@ -98,6 +149,16 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                 {item.href === "/replies" && unread ? (
                   <span className="ml-auto rounded-full bg-yellow-400 px-2 text-xs font-semibold text-black">{unread}</span>
                 ) : null}
+                {item.href === "/email-health" && alerts?.open ? (
+                  <span
+                    className={cn(
+                      "ml-auto rounded-full px-2 text-xs font-semibold",
+                      alerts.critical ? "bg-red-500 text-white" : "bg-yellow-400 text-black"
+                    )}
+                  >
+                    {alerts.open}
+                  </span>
+                ) : null}
               </Link>
             );
           })}
@@ -124,6 +185,23 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         <header className="flex items-center justify-between border-b border-border bg-card px-4 py-3">
           <div className="font-medium md:hidden">Lead Generator</div>
           <div className="ml-auto flex items-center gap-3 text-sm">
+            <Link
+              href="/email-health"
+              title={alerts?.open ? `${alerts.open} email health alert(s)` : "Email health: no alerts"}
+              className="relative rounded-md p-2 hover:bg-background"
+            >
+              <Bell size={16} className={alerts?.critical ? "text-red-500" : alerts?.open ? "text-yellow-500" : ""} />
+              {alerts?.unread ? (
+                <span
+                  className={cn(
+                    "absolute -right-0.5 -top-0.5 min-w-4 rounded-full px-1 text-center text-[10px] font-semibold leading-4",
+                    alerts.critical ? "bg-red-500 text-white" : "bg-yellow-400 text-black"
+                  )}
+                >
+                  {alerts.unread}
+                </span>
+              ) : null}
+            </Link>
             <span className="hidden text-muted sm:inline">{email}</span>
             <button
               onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
@@ -141,6 +219,18 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             </button>
           </div>
         </header>
+        {alerts?.top_critical && pathname !== "/email-health" ? (
+          <Link
+            href="/email-health"
+            className="flex flex-wrap items-center gap-2 border-b border-red-300 bg-red-50 px-4 py-2 text-sm text-red-800 dark:border-red-900 dark:bg-red-950 dark:text-red-200"
+          >
+            <ShieldAlert size={16} />
+            <span className="font-medium">{alerts.top_critical.title}</span>
+            <span>· {alerts.top_critical.subject}</span>
+            {alerts.critical > 1 ? <span>· +{alerts.critical - 1} more</span> : null}
+            <span className="ml-auto underline">What to do</span>
+          </Link>
+        ) : null}
         <main className="flex-1 p-4 md:p-6">{children}</main>
       </div>
     </div>

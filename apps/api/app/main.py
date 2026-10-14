@@ -23,7 +23,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from app.config import get_settings
 from app.database import engine
 from app.logging_config import configure_logging, get_logger
-from app.routers import analytics, audits, auth, campaigns, conversations, email_accounts, leads, scheduling, scraping, templates, tracking
+from app.routers import analytics, audits, auth, campaigns, conversations, email_accounts, health_alerts, leads, scheduling, scraping, templates, tracking
 from app.routers import settings as settings_router
 from app.routers.analytics import dashboard_router
 from app.routers.misc import router_audit, router_logs, router_public, router_suppression
@@ -61,6 +61,7 @@ app.include_router(templates.router, prefix=f"{app_settings.api_prefix}/email-te
 app.include_router(campaigns.router, prefix=app_settings.api_prefix)
 app.include_router(email_accounts.router, prefix=app_settings.api_prefix)
 app.include_router(conversations.router, prefix=app_settings.api_prefix)
+app.include_router(health_alerts.router, prefix=app_settings.api_prefix)
 app.include_router(settings_router.router, prefix=app_settings.api_prefix)
 app.include_router(analytics.router, prefix=app_settings.api_prefix)
 app.include_router(dashboard_router, prefix=app_settings.api_prefix)

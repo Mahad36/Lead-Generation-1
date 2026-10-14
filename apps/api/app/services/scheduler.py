@@ -65,11 +65,13 @@ def deliverability_round() -> dict:
     from app.services.account_health import assess_all
     from app.services.followups import run_followups
     from app.services.gmail_signature import refresh_due
+    from app.services.health_alerts import run_all as run_health_alerts
     from app.services.warmup import run_warmup
 
     result = {}
     jobs = (
         ("account_health", assess_all),  # status + safe capacity of every account, before anything is sent
+        ("health_alerts", run_health_alerts),  # warnings that sending could hurt an inbox or domain
         ("signatures", refresh_due),
         ("followups", run_followups),
         ("warmup", run_warmup),

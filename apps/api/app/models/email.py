@@ -241,3 +241,29 @@ class WarmupMessage(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     landed: Mapped[str] = mapped_column(String(16), default="", nullable=False)  # inbox | spam | promotions | missing
     handled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     replied: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
+
+class HealthAlert(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """A warning that sending could hurt an inbox / domain (services/health_alerts.py). One open alert per key;
+    resolved_at is set once the signal clears."""
+
+    __tablename__ = "health_alerts"
+    __table_args__ = (UniqueConstraint("user_id", "key", name="uq_health_alert_user_key"),)
+
+    user_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False), ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    email_account_id: Mapped[str | None] = mapped_column(
+        UUID(as_uuid=False), ForeignKey("email_accounts.id", ondelete="CASCADE"), nullable=True
+    )
+    key: Mapped[str] = mapped_column(String(160), nullable=False)  # e.g. "bounces:<account id>", "dns:example.com"
+    kind: Mapped[str] = mapped_column(String(40), nullable=False)
+    severity: Mapped[str] = mapped_column(String(16), default="warning", nullable=False)  # warning | critical
+    subject: Mapped[str] = mapped_column(String(255), default="", nullable=False)  # the inbox or domain
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    message: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    advice: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True, nullable=True)
+    notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)  # pop-up shown
+    read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
