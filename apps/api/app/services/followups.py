@@ -231,6 +231,18 @@ def send_followup(db: Session, root: EmailMessage, step: int, steps: int) -> Ema
     from app.services.conversations import add_message
     from app.services.tracking import new_rfc_message_id, open_pixel_html, track_links, tracks_opens, unsubscribe_url
 
+    # Never twice: a follow-up step that is already sending / sent (worker restart, retry) is not sent again
+    existing = (
+        db.query(EmailMessage)
+        .filter(
+            EmailMessage.followup_of_id == root.id,
+            EmailMessage.followup_step == step,
+            EmailMessage.status.in_(["sending", "sent"]),
+        )
+        .first()
+    )
+    if existing:
+        return existing
     settings = _settings(db, root.user_id)
     account = db.get(EmailAccount, root.email_account_id)
     lead = db.get(Lead, root.lead_id) if root.lead_id else None
@@ -284,8 +296,14 @@ def send_followup(db: Session, root: EmailMessage, step: int, steps: int) -> Ema
             headers=headers,
         )
     except GmailSendError as exc:
-        message.status, message.error_message = "failed", str(exc)
+        message.status, message.error_message, message.error_kind = "failed", str(exc), exc.kind
+        if not exc.retryable:
+            root.followups_done_at = datetime.now(UTC)  # a permanent failure ends the thread's follow-ups
         db.commit()
+        if exc.kind == "recipient":
+            from app.services.account_health import suppress_refused_recipient
+
+            suppress_refused_recipient(db, root.user_id, root.lead_id, root.recipient_email)
         raise
     now = datetime.now(UTC)
     message.status, message.provider_message_id, message.sent_at = "sent", provider_id, now

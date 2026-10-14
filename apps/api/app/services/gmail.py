@@ -42,10 +42,12 @@ class EmailAttachment:
 
 
 class GmailSendError(Exception):
-    def __init__(self, message: str, *, retryable: bool = False, status_code: int | None = None):
+    def __init__(self, message: str, *, retryable: bool = False, status_code: int | None = None, kind: str = ""):
         super().__init__(message)
         self.retryable = retryable
         self.status_code = status_code
+        # account_health.classify_send_error: temporary | rate_limited | quota | auth | recipient | rejected | other
+        self.kind = kind or ("temporary" if retryable else "other")
 
 
 def oauth_scopes() -> list[str]:
@@ -408,33 +410,40 @@ def send_smtp_message(
         account.last_successful_send_at = datetime.now(UTC)
         account.last_error = ""
         account.status = "connected"
+        from app.services.account_health import record_send_success
+
+        record_send_success(db, account)
         db.add(account)
         db.commit()
         return f"smtp:{datetime.now(UTC).timestamp()}"
     except Exception as exc:
-        message = _smtp_error_text(exc)
+        from app.services.account_health import RETRYABLE, classify_send_error, record_send_failure
+
+        kind, code = classify_send_error(exc)
+        message = _smtp_error_text(exc, kind, code)
         account.last_error = message[:240]
         db.add(account)
         db.commit()
-        logger.error("smtp_send_failed", account_id=account.id, error=str(exc))
-        raise GmailSendError(message[:240], retryable=True) from exc
+        record_send_failure(db, account, kind, f"code {code}" if code else kind)
+        logger.error("smtp_send_failed", account_id=account.id, kind=kind, code=code, error=str(exc)[:300])
+        raise GmailSendError(message[:240], retryable=kind in RETRYABLE, status_code=code, kind=kind) from exc
 
 
-def _smtp_error_text(exc: Exception) -> str:
+def _smtp_error_text(exc: Exception, kind: str = "", code: int | None = None) -> str:
     """A readable reason instead of the raw SMTP tuple (e.g. Gmail's "421 4.4.5 Server busy")."""
-    import smtplib
+    if not kind:
+        from app.services.account_health import classify_send_error
 
-    code = getattr(exc, "smtp_code", None)
-    if isinstance(exc, smtplib.SMTPResponseException) and code and 400 <= code < 500:
-        return (
-            f"Gmail was busy and asked to try again later (temporary, code {code}). "
-            "Automatic emails are retried in about 10 minutes."
-        )
-    if isinstance(exc, smtplib.SMTPAuthenticationError):
-        return "Gmail rejected the login. Replace the App Password in Email setup."
-    if isinstance(exc, smtplib.SMTPRecipientsRefused):
-        return "Gmail refused the recipient address."
-    return str(exc)
+        kind, code = classify_send_error(exc)
+    tag = f" (code {code})" if code else ""
+    return {
+        "temporary": f"Gmail was busy and asked to try again later{tag}. Retried automatically with increasing waits.",
+        "rate_limited": f"Gmail is rate-limiting this account{tag}. Retried automatically after a longer wait.",
+        "quota": f"Gmail says this account reached its daily sending limit{tag}. It pauses for 24 hours.",
+        "auth": "Gmail rejected the login. Replace the App Password in Email setup.",
+        "recipient": f"The recipient address doesn't exist or refused mail{tag}. Not retried; the address is suppressed.",
+        "rejected": f"Gmail blocked this message as against its policy{tag}. Not retried; the account slows down.",
+    }.get(kind, str(exc))
 
 
 def sender_header(account: EmailAccount) -> str:
@@ -461,9 +470,11 @@ def sent_today_count(db: Session, account: EmailAccount) -> int:
 
 
 def daily_limit_reached(db: Session, account: EmailAccount) -> bool:
-    """Today's limit reached (lower while a new inbox ramps up)."""
+    """Today's limit reached: your limit, lower while ramping up or when the account's health calls for it."""
     from app.services.deliverability import effective_daily_limit
 
+    if account.recommended_limit is not None and account.recommended_limit <= 0:
+        return True  # paused by its health status
     limit = effective_daily_limit(account)
     return bool(limit) and sent_today_count(db, account) >= limit
 

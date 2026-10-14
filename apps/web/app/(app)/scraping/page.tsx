@@ -70,7 +70,7 @@ export default function ScrapingPage() {
   const [leads, setLeads] = useState<LeadRow[]>([]);
   const [dailyLimit, setDailyLimit] = useState(50);
   const [outreachMode, setOutreachMode] = useState<OutreachMode>("auto");
-  const [outreachLimit, setOutreachLimit] = useState(10);
+  const [outreachLimit, setOutreachLimit] = useState(0); // audits per day; 0 = no limit
   const [outreachAccount, setOutreachAccount] = useState(""); // "" = automatic (rotation)
   const [followups, setFollowups] = useState(true);
   const [source, setSource] = useState<{ provider: string; apifyReady: boolean } | null>(null);

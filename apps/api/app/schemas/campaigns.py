@@ -37,6 +37,12 @@ class CampaignCreate(BaseModel):
     followups: bool = True
     # When this campaign's emails go out (None: your sending hours)
     schedule: ScheduleIn | None = None
+    # Email rotation: single (email_account_id) | auto (all eligible accounts by remaining capacity) |
+    # selected (only account_ids) | health (all eligible accounts, healthier first). None: auto unless an account is set.
+    rotation_mode: Literal["single", "auto", "selected", "health"] | None = None
+    account_ids: list[str] = []
+    # Audit campaigns: audits per day (None / 0 = no limit); separate from how many emails the inboxes can send
+    audit_limit: int | None = Field(default=None, ge=0, le=100000)
 
     @model_validator(mode="after")
     def require_leads_or_import(self):
@@ -122,6 +128,8 @@ class CampaignPreview(BaseModel):
     daily_limit: int
     estimated_duration_minutes: int
     skipped_details: list[dict] = []
+    # Before launch: audited websites, valid recipients, accounts and their capacity, timing, warnings
+    summary: dict = {}
 
 
 class CampaignLeadEdit(BaseModel):

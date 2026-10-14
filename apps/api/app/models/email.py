@@ -54,6 +54,15 @@ class EmailAccount(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     gmail_signature_from: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     gmail_signature_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     gmail_signature_error: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    # Sending health from available evidence (services/account_health.py): healthy | monitoring | reduced |
+    # paused | reconnect. A summary of what the app can observe, not Gmail's private reputation.
+    health_status: Mapped[str] = mapped_column(String(32), default="monitoring", nullable=False)
+    health_reason: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    health_signals: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
+    recommended_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)  # today's safe capacity
+    restricted_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)  # backoff
+    consecutive_failures: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    health_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     user = relationship("User")
 
@@ -117,6 +126,8 @@ class EmailMessage(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     # First emails: follow-ups go out after it (decided when it was sent); done = finished or stopped
     followups_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     followups_done_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Failed sends: temporary | quota | rate_limited | auth | recipient | rejected | other
+    error_kind: Mapped[str] = mapped_column(String(32), default="", nullable=False)
 
     events: Mapped[list["EmailEvent"]] = relationship(
         back_populates="message", cascade="all, delete-orphan"

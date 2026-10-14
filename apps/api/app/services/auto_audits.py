@@ -55,7 +55,9 @@ def candidate_leads_query(db: Session, user_id: str, job_id: str | None = None):
     never contacted, not suppressed, not waiting in a campaign. `job_id` limits it to one scrape file."""
     app = get_settings()
     # Any audit that didn't fail blocks the lead; failed ones block it during the cooldown and after the last attempt.
-    audited = select(WebsiteAudit.lead_id).where(WebsiteAudit.user_id == user_id, WebsiteAudit.status != "failed")
+    audited = select(WebsiteAudit.lead_id).where(
+        WebsiteAudit.user_id == user_id, WebsiteAudit.status.not_in(["failed", "retry"])
+    )
     cooling = select(WebsiteAudit.lead_id).where(
         WebsiteAudit.user_id == user_id,
         WebsiteAudit.status == "failed",
@@ -138,7 +140,14 @@ def job_outreach_status(db: Session, job: ScrapingJob) -> dict:
             else ""
         ),
         "auto_send": job.outreach_auto_send,
-        "daily_limit": job.outreach_daily_limit,
+        "daily_limit": job.outreach_daily_limit,  # 0 = no daily audit limit
+        # Progress over the whole file
+        "audited_total": audits.filter(WebsiteAudit.status.not_in(["failed", "retry", "cancelled", *ACTIVE_STATUSES])).count(),
+        "failed_total": audits.filter(WebsiteAudit.status == "failed").count(),
+        "send_failed_total": audits.filter(WebsiteAudit.status == "send_failed").count(),
+        "waiting_to_send": audits.filter(
+            WebsiteAudit.status == "ready", WebsiteAudit.sent_at.is_(None), WebsiteAudit.auto_send.is_(True)
+        ).count(),
         # Failed audits don't use up the daily allowance (retries are capped by AUTO_AUDIT_MAX_ATTEMPTS).
         "audits_today": audits.filter(WebsiteAudit.created_at >= today, WebsiteAudit.status != "failed").count(),
         "sent_today": audits.filter(WebsiteAudit.sent_at >= today).count(),
@@ -213,7 +222,7 @@ def set_job_outreach(
     if auto_send is not None:
         job.outreach_auto_send = auto_send
     if daily_limit is not None:
-        job.outreach_daily_limit = max(1, min(int(daily_limit), 500))
+        job.outreach_daily_limit = max(0, int(daily_limit))  # 0 = no daily audit limit
     if action in {"start", "resume"}:
         job.outreach_status = "running"
     elif action == "pause" and job.outreach_status == "running":
@@ -228,6 +237,10 @@ def set_job_outreach(
             audit.auto_send = False
             if audit.status == "ready":
                 audit.step = CAMPAIGN_STOPPED_STEP
+    elif action == "retry_failed":
+        # Failed audits get another go (the poller picks their leads up again)
+        for audit in _job_audits(db, job).filter(WebsiteAudit.status == "failed"):
+            audit.status, audit.step = "retry", "Cleared for another attempt"
     elif action != "update":
         raise HTTPException(status_code=400, detail="Unknown outreach action")
     db.commit()
@@ -268,26 +281,38 @@ def release_held_sends(db: Session, job: ScrapingJob) -> int:
 # ---------------------------------------------------------------- polling
 
 
+RETRY_FIRST_MINUTES = 10
+
+
+def retry_wait_minutes(attempts: int) -> int:
+    """Wait before re-sending after `attempts` failed tries: 10, 20, 40, ... minutes (at most 6 hours)."""
+    return min(RETRY_FIRST_MINUTES * 2 ** max((attempts or 1) - 1, 0), 360)
+
+
 def retry_failed_sends(db: Session) -> int:
     """Re-send automatic emails that failed to send (e.g. Gmail's "421 server busy"), a limited number of times.
 
     Covers scrape files, campaigns and manual audits set to send automatically; paused / stopped ones wait.
     """
     app = get_settings()
+    now = datetime.now(UTC)
     rows = (
         db.query(WebsiteAudit)
         .filter(
             WebsiteAudit.auto_send.is_(True),
             WebsiteAudit.status == "send_failed",
+            WebsiteAudit.send_retryable.is_(True),  # permanent failures (bad address, blocked) are never retried
             WebsiteAudit.send_attempts < app.auto_send_max_attempts,
-            WebsiteAudit.updated_at <= datetime.now(UTC) - timedelta(minutes=10),
+            WebsiteAudit.updated_at <= now - timedelta(minutes=RETRY_FIRST_MINUTES),
         )
         .order_by(WebsiteAudit.updated_at.asc())
-        .limit(5)
+        .limit(20)
         .all()
     )
     sent = 0
     for audit in rows:
+        if audit.updated_at > now - timedelta(minutes=retry_wait_minutes(audit.send_attempts)):
+            continue  # exponential backoff: 10, 20, 40... minutes after each failed attempt
         if outreach_hold(db, audit):
             continue
         try:
@@ -320,7 +345,11 @@ def poll_job(db: Session, job: ScrapingJob) -> int:
     today = _today_start()
     used_today = _job_audits(db, job).filter(WebsiteAudit.created_at >= today, WebsiteAudit.status != "failed").count()
     batch = max(1, get_settings().auto_audit_batch_size)
-    room = min(job.outreach_daily_limit - used_today, batch - _running_audits(db, job.user_id))
+    # Audits are not tied to sending capacity: finished emails simply wait for an inbox with room.
+    # The real limits are the parallel audits (Claude + a browser each) and the optional daily audit limit (0 = none).
+    room = batch - _running_audits(db, job.user_id)
+    if job.outreach_daily_limit:
+        room = min(room, job.outreach_daily_limit - used_today)
     if room <= 0:
         return 0
     started = 0

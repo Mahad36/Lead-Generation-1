@@ -21,7 +21,13 @@ from app.models import (
 from app.schemas.campaigns import CampaignCreate
 from app.services.ai import AINotConfiguredError, generate_personalized_email
 from app.services.audit import write_audit
-from app.services.deliverability import MIN_SEND_GAP_SECONDS, address_problem, pick_sending_account, sent_recently
+from app.services.deliverability import (
+    MIN_SEND_GAP_SECONDS,
+    account_ready,
+    address_problem,
+    pick_sending_account,
+    sent_recently,
+)
 from app.services.gmail import GmailSendError, daily_limit_reached, send_gmail_message
 from app.services.limits import LimitValidationError, validate_send_limits
 from app.services.suppression import is_suppressed
@@ -270,6 +276,11 @@ def create_campaign(db: Session, user_id: str, data: CampaignCreate, meta: dict)
         raise HTTPException(status_code=400, detail="No leads with an email address to campaign")
     for lead in leads:
         db.add(CampaignLead(campaign_id=campaign.id, lead_id=lead.id, status="pending"))
+    rotation_mode = data.rotation_mode or ("single" if data.email_account_id else "auto")
+    if rotation_mode == "selected":
+        own = {a.id for a in db.query(EmailAccount.id).filter(EmailAccount.user_id == user_id)}
+        if not data.account_ids or any(a not in own for a in data.account_ids):
+            raise HTTPException(status_code=400, detail="Choose at least one of your connected accounts for rotation.")
     extra = {
         **(campaign.extra or {}),
         **_campaign_file_extra(db, user_id, data),
@@ -277,8 +288,12 @@ def create_campaign(db: Session, user_id: str, data: CampaignCreate, meta: dict)
         "add_signature": data.add_signature,
         "followups": data.followups,
         # No inbox chosen: each email goes from the connected inbox with the most room today
-        "rotate": not data.email_account_id,
+        "rotate": rotation_mode != "single",
         "schedule": data.schedule.as_dict() if data.schedule else None,
+        # Audit campaigns: audits per day (0 = no limit), separate from what the inboxes can send
+        "audit_limit": data.audit_limit or 0,
+        # Email rotation: single | auto | selected | health, and the accounts it may use
+        "rotation": {"mode": rotation_mode, "account_ids": list(data.account_ids or [])},
         # Template campaigns send in one batch: their schedule follows the leads' most common time zone
         "timezone": _main_timezone(leads),
     }
@@ -426,6 +441,7 @@ def serialize_campaign(db: Session, campaign: Campaign) -> dict:
         "outreach_mode": "audit" if is_audit_campaign(campaign) else "template",
         "auditing_count": counts.get("auditing", 0),
         "rotate": campaign_rotates(campaign),
+        "rotation": campaign_rotation(campaign),
         "followups": campaign_followups(campaign),
     }
 
@@ -658,7 +674,8 @@ def send_claimed_lead(db: Session, campaign_lead: CampaignLead) -> str:
     lead = db.get(Lead, campaign_lead.lead_id)
     account = db.get(EmailAccount, campaign.email_account_id) if campaign else None
     if campaign and campaign_rotates(campaign):
-        account = pick_sending_account(db, campaign.user_id) or account
+        rotation = campaign_rotation(campaign)
+        account = pick_sending_account(db, campaign.user_id, rotation["account_ids"] or None, rotation["mode"]) or account
     if not campaign or not lead or not account:
         campaign_lead.status = "failed"
         campaign_lead.error_message = "Missing campaign, lead, or email account"
@@ -720,13 +737,23 @@ def send_claimed_lead(db: Session, campaign_lead: CampaignLead) -> str:
         campaign_lead.locked_at = None
         db.commit()
         return "failed"
-    if account.paused_reason:
-        # Too many bounces: wait until the inbox is resumed in Email setup (or another inbox is chosen)
-        campaign.status = "paused"
-        campaign.paused_reason = "inbox_paused_bounces"
+    if not account_ready(account):
         campaign_lead.status = "queued"
         campaign_lead.locked_at = None
         campaign_lead.locked_by = ""
+        until = account.restricted_until
+        if until and until > datetime.now(UTC) and not account.paused_reason and account.health_status != "reconnect":
+            # Gmail asked to slow down (backoff) or its daily quota was hit: carry on when the restriction clears
+            campaign.next_eligible_at = until
+            db.commit()
+            return "restricted"
+        # No eligible inbox (paused for bounces / reconnect needed): pause and say why on the campaign page
+        campaign.status = "paused"
+        campaign.paused_reason = "no_eligible_inbox"
+        campaign.error_message = (
+            f"{account.email_address} can't send ({account.health_reason or account.paused_reason}). "
+            "Resume or reconnect it in Email setup, or let the campaign rotate to another inbox."
+        )
         db.commit()
         return "inbox_paused"
     if sent_recently(db, account):
@@ -844,6 +871,11 @@ def send_claimed_lead(db: Session, campaign_lead: CampaignLead) -> str:
     except GmailSendError as exc:
         message.status = "failed"
         message.error_message = str(exc)
+        message.error_kind = exc.kind
+        if exc.kind == "recipient":
+            from app.services.account_health import suppress_refused_recipient
+
+            suppress_refused_recipient(db, campaign.user_id, lead.id, lead.primary_email)
         campaign_lead.attempts += 1
         campaign_lead.error_message = str(exc)
         campaign_lead.locked_at = None
@@ -980,9 +1012,10 @@ def advance_audit_campaign(db: Session, campaign: Campaign) -> tuple[str, int | 
     db.commit()
 
     reset_counters_if_needed(campaign)
-    account = db.get(EmailAccount, campaign.email_account_id) if campaign.email_account_id else None
-    account_full = bool(account) and not campaign.require_approval and daily_limit_reached(db, account)
-    if campaign.sent_today >= campaign.daily_limit or account_full:
+    # Audits are separate from sending: emails that can't go yet wait for an inbox with room.
+    # Only the campaign's own audits-per-day limit (0 / none = no limit) holds audits back.
+    audit_limit = (campaign.extra or {}).get("audit_limit", campaign.daily_limit)
+    if audit_limit and campaign.sent_today >= audit_limit:
         campaign.status, campaign.paused_reason = "paused", "daily_limit_reached"
         db.commit()
         return "daily_limit", _seconds_until_tomorrow()
@@ -1110,9 +1143,21 @@ def campaign_adds_signature(db: Session, audit) -> bool:
     return not campaign or (campaign.extra or {}).get("add_signature", True) is not False
 
 
+def campaign_rotation(campaign: Campaign) -> dict:
+    """{"mode": single | auto | selected | health, "account_ids": [...]}.
+
+    single: the campaign's own account; auto: every eligible connected account by remaining capacity;
+    selected: only the chosen accounts; health: every eligible account, healthier ones first.
+    """
+    extra = campaign.extra or {}
+    rotation = extra.get("rotation") or {}
+    mode = rotation.get("mode") or ("auto" if extra.get("rotate") else "single")
+    return {"mode": mode, "account_ids": list(rotation.get("account_ids") or []) if mode == "selected" else []}
+
+
 def campaign_rotates(campaign: Campaign) -> bool:
-    """No inbox chosen: emails rotate across every connected inbox."""
-    return bool((campaign.extra or {}).get("rotate"))
+    """Emails rotate across accounts (any mode except single)."""
+    return campaign_rotation(campaign)["mode"] != "single"
 
 
 def campaign_followups(campaign: Campaign | None) -> bool:
@@ -1231,17 +1276,36 @@ def release_paused_sends(db: Session, campaign: Campaign) -> int:
     return sent
 
 
-def set_campaign_email_account(db: Session, user_id: str, campaign_id: str, account_id: str | None) -> Campaign:
-    """Send the rest of this campaign from another account ("" / None: the default account).
+def set_campaign_email_account(
+    db: Session,
+    user_id: str,
+    campaign_id: str,
+    account_id: str | None,
+    mode: str | None = None,
+    account_ids: list[str] | None = None,
+) -> Campaign:
+    """Change how the rest of this campaign is sent: one account, or rotation (auto / selected / health).
 
-    Emails already sent stay as they are; audits still being prepared or waiting to send switch to the new account.
+    Emails already sent stay as they are; emails not sent yet follow the new choice. Nothing is sent twice: each
+    email is claimed once before it is sent, whichever account sends it.
     """
     from app.models import WebsiteAudit
 
     campaign = get_campaign(db, user_id, campaign_id)
-    account = resolve_email_account(db, user_id, account_id or None)
+    mode = mode or ("single" if account_id else "auto")
+    if mode == "selected":
+        own = {a.id for a in db.query(EmailAccount.id).filter(EmailAccount.user_id == user_id)}
+        if not account_ids or any(a not in own for a in account_ids):
+            raise HTTPException(status_code=400, detail="Choose at least one of your connected accounts for rotation.")
+    account = resolve_email_account(db, user_id, account_id if mode == "single" else None)
     campaign.email_account_id = account.id
-    campaign.extra = {**(campaign.extra or {}), "rotate": not account_id}
+    campaign.extra = {
+        **(campaign.extra or {}),
+        "rotate": mode != "single",
+        "rotation": {"mode": mode, "account_ids": list(account_ids or []) if mode == "selected" else []},
+    }
+    if campaign.status == "paused" and campaign.paused_reason == "no_eligible_inbox":
+        campaign.status, campaign.paused_reason, campaign.error_message = "running", "", ""
     lead_ids = [row[0] for row in db.query(CampaignLead.lead_id).filter(CampaignLead.campaign_id == campaign.id)]
     if lead_ids and is_audit_campaign(campaign):
         for audit in db.query(WebsiteAudit).filter(
@@ -1250,8 +1314,177 @@ def set_campaign_email_account(db: Session, user_id: str, campaign_id: str, acco
             WebsiteAudit.lead_id.in_(lead_ids),
             WebsiteAudit.sent_at.is_(None),
         ):
-            audit.email_account_id = None if not account_id else account.id  # None: rotation picks at send time
+            audit.email_account_id = account.id if mode == "single" else None  # None: rotation picks at send time
     db.commit()
     db.refresh(campaign)
     logger.info("campaign_account_changed", campaign_id=campaign.id, account_id=account.id)
     return campaign
+
+
+def campaign_account_report(db: Session, user_id: str, campaign_id: str) -> dict:
+    """Per-account and overall progress: attempted, sent, failed (and why), and what is still pending."""
+    from app.services.account_health import STATUS_LABEL
+
+    campaign = get_campaign(db, user_id, campaign_id)
+    rows = (
+        db.query(EmailMessage)
+        .filter(EmailMessage.campaign_id == campaign.id, EmailMessage.is_test.is_(False))
+        .all()
+    )
+    accounts: dict[str, dict] = {}
+    for m in rows:
+        entry = accounts.setdefault(
+            m.email_account_id or "",
+            {"attempted": 0, "sent": 0, "failed": 0, "followups_sent": 0, "bounced": 0, "replied": 0, "failures": {}},
+        )
+        entry["attempted"] += 1
+        if m.status == "sent":
+            entry["sent"] += 1
+            if m.followup_of_id:
+                entry["followups_sent"] += 1
+            if m.bounced_at:
+                entry["bounced"] += 1
+            if m.replied_at:
+                entry["replied"] += 1
+        elif m.status == "failed":
+            entry["failed"] += 1
+            kind = m.error_kind or "other"
+            entry["failures"][kind] = entry["failures"].get(kind, 0) + 1
+    names = {a.id: a for a in db.query(EmailAccount).filter(EmailAccount.id.in_([k for k in accounts if k]))}
+    per_account = [
+        {
+            "account_id": key,
+            "email_address": names[key].email_address if key in names else "(removed account)",
+            "status": STATUS_LABEL.get(names[key].health_status, "") if key in names else "",
+            **value,
+        }
+        for key, value in accounts.items()
+    ]
+    counts = dict(
+        db.query(CampaignLead.status, func.count(CampaignLead.id))
+        .filter(CampaignLead.campaign_id == campaign.id)
+        .group_by(CampaignLead.status)
+        .all()
+    )
+    pending = sum(counts.get(s, 0) for s in ("pending", "queued", "ready", "approved", "generating", "auditing", "sending"))
+    return {
+        "rotation": campaign_rotation(campaign),
+        "accounts": sorted(per_account, key=lambda r: -r["attempted"]),
+        "overall": {
+            "leads": sum(counts.values()),
+            "sent": counts.get("sent", 0),
+            "failed": counts.get("failed", 0),
+            "skipped": counts.get("skipped", 0) + counts.get("unsubscribed", 0),
+            "pending": pending,
+        },
+    }
+
+
+COMPLIANCE_NOTES = {
+    "United States": "CAN-SPAM: commercial emails must include your physical postal address and a working opt-out. "
+    "The opt-out link is added automatically; put your business address in your Gmail signature.",
+    "Canada": "CASL: only email addresses the business published itself (website, listings), about something "
+    "relevant to its business, identify yourself, and honour opt-outs within 10 days (automatic here).",
+    "Australia": "Spam Act: only addresses the business published itself, relevant to its business, with your "
+    "identity and a working unsubscribe (automatic here).",
+    "United Kingdom": "UK GDPR / PECR: fine for companies on legitimate interest with an easy opt-out; sole traders "
+    "and partnerships need prior consent.",
+    "Ireland": "GDPR / ePrivacy: business addresses on legitimate interest with an easy opt-out; individuals need consent.",
+    "Germany": "UWG / GDPR: Germany is strict on unsolicited B2B email; prior consent is generally expected.",
+    "New Zealand": "Unsolicited Electronic Messages Act: published business addresses only, relevant, with opt-out.",
+}
+
+
+def launch_summary(db: Session, user_id: str, lead_ids: list[str], data: CampaignCreate) -> dict:
+    """Everything to check before launching: contacts, accounts and their capacity, timing, warnings."""
+    from collections import Counter
+    from math import ceil
+
+    from app.models import WebsiteAudit
+    from app.services.account_health import STATUS_LABEL
+    from app.services.deliverability import account_ready, effective_daily_limit, remaining_today
+    from app.services.markets import best_time
+
+    leads = db.query(Lead).filter(Lead.user_id == user_id, Lead.id.in_(lead_ids)).all() if lead_ids else []
+    with_website = sum(1 for lead in leads if lead.website_url)
+    audited = (
+        db.query(func.count(func.distinct(WebsiteAudit.lead_id)))
+        .filter(WebsiteAudit.user_id == user_id, WebsiteAudit.lead_id.in_(lead_ids), WebsiteAudit.status.in_(["ready", "sent"]))
+        .scalar()
+        if lead_ids
+        else 0
+    ) or 0
+    valid = [
+        lead
+        for lead in leads
+        if lead.primary_email and not lead.do_not_contact and lead.email_status not in ("bounced", "undeliverable")
+    ]
+
+    mode = data.rotation_mode or ("single" if data.email_account_id else "auto")
+    query = db.query(EmailAccount).filter(EmailAccount.user_id == user_id, EmailAccount.status.in_(["connected", "expired"]))
+    accounts = list(query)
+    if mode == "single":
+        chosen = [a for a in accounts if a.id == data.email_account_id] or [a for a in accounts if a.is_default][:1] or accounts[:1]
+    elif mode == "selected":
+        chosen = [a for a in accounts if a.id in (data.account_ids or [])]
+    else:
+        chosen = accounts
+    rows, capacity, warnings = [], 0, []
+    for a in chosen:
+        ready = account_ready(a)
+        limit = effective_daily_limit(a) if ready else 0
+        capacity += limit
+        rows.append(
+            {
+                "account_id": a.id,
+                "email_address": a.email_address,
+                "status": STATUS_LABEL.get(a.health_status, a.health_status),
+                "status_key": a.health_status,
+                "reason": a.health_reason,
+                "capacity_today": limit,
+                "remaining_today": remaining_today(db, a) if ready else 0,
+                "signature": bool(a.gmail_signature_html),
+            }
+        )
+        if not ready:
+            warnings.append(f"{a.email_address}: {STATUS_LABEL.get(a.health_status, 'not available')}, gets nothing until it recovers.")
+        elif a.health_status == "reduced":
+            warnings.append(f"{a.email_address}: sending reduced ({a.health_reason})")
+        if not a.gmail_signature_html:
+            warnings.append(f"{a.email_address}: no Gmail signature found; its emails go out without one.")
+    if not chosen:
+        warnings.append("No accounts selected: choose at least one connected Gmail.")
+    elif not capacity:
+        warnings.append("None of the selected accounts can send right now. The campaign will wait until one can.")
+
+    to_send = len(valid)
+    per_day = capacity
+    audit_limit = data.audit_limit or 0
+    if data.outreach_mode == "audit" and audit_limit:
+        per_day = min(per_day, audit_limit) if per_day else 0
+    days = ceil(to_send / per_day) if per_day and to_send else None
+
+    countries = Counter((lead.country or "").strip() for lead in valid if (lead.country or "").strip())
+    main_country = countries.most_common(1)[0][0] if countries else ""
+    compliance = [
+        {"country": c, "count": n, "note": COMPLIANCE_NOTES[c]} for c, n in countries.most_common() if c in COMPLIANCE_NOTES
+    ]
+    return {
+        "leads": len(leads),
+        "with_website": with_website,
+        "websites_audited": audited,
+        "contacts_with_email": sum(1 for lead in leads if lead.primary_email),
+        "valid_recipients": to_send,
+        "rotation_mode": mode,
+        "accounts": rows,
+        "capacity_per_day": capacity,
+        "estimated_days": days,
+        "estimate_note": (
+            "At today's capacity (inboxes' safe limits, after health and ramp-up), within your schedule. "
+            "Anything that can't go today waits for the next allowed day; limits are never exceeded."
+        ),
+        "warnings": warnings,
+        "compliance": compliance,
+        "main_country": main_country,
+        "best_time": best_time(main_country) if main_country else None,
+    }

@@ -18,6 +18,11 @@ export type FileOutreach = {
   failed_today: number;
   waiting_leads: number;
   poll_seconds: number;
+  // Whole-file progress
+  audited_total?: number;
+  failed_total?: number;
+  send_failed_total?: number;
+  waiting_to_send?: number;
   // The account this file sends from (null = your default account)
   email_account_id: string | null;
   email_account: string;
@@ -79,17 +84,24 @@ export function OutreachModePicker({
         ))}
       </div>
       {mode !== "off" ? (
-        <label className="flex items-center gap-2 text-sm">
-          Max audits per day for this file
-          <Input
-            className="h-8 w-20 py-1"
-            type="number"
-            min={1}
-            max={500}
-            value={limit}
-            onChange={(e) => onLimit(Math.max(1, Number(e.target.value) || 1))}
-          />
-        </label>
+        <div className="space-y-1">
+          <label className="flex items-center gap-2 text-sm">
+            Max audits per day for this file
+            <Input
+              className="h-8 w-24 py-1"
+              type="number"
+              min={0}
+              placeholder="No limit"
+              value={limit || ""}
+              onChange={(e) => onLimit(Math.max(0, Number(e.target.value) || 0))}
+            />
+          </label>
+          <p className="text-xs text-muted">
+            Empty = no limit. Audits don&apos;t depend on how many emails your inboxes can send: finished emails wait
+            for an inbox with room. The real limits are your Claude plan&apos;s usage and 2 audits at a time (each one
+            runs Claude and a browser on this PC, about 2-3 minutes).
+          </p>
+        </div>
       ) : null}
       {mode !== "off" ? <OutreachIssues /> : null}
     </div>
@@ -131,9 +143,10 @@ export function FileOutreachControls({
   }
 
   function saveLimit() {
-    const value = Number(limit);
+    const value = Math.max(0, Number(limit) || 0);
     setDraft(null);
-    if (value >= 1 && value !== o.daily_limit) send("update", { daily_limit: value }, `Daily limit for this file: ${value}`);
+    if (value !== o.daily_limit)
+      send("update", { daily_limit: value }, value ? `Daily audit limit for this file: ${value}` : "No daily audit limit for this file");
   }
 
   return (
@@ -141,9 +154,13 @@ export function FileOutreachControls({
       <Badge tone={TONE[o.status]}>{LABEL[o.status]}</Badge>
       {o.status !== "off" ? (
         <span className="text-xs text-muted">
-          {o.audits_today}/{o.daily_limit} today · {o.sent_total} sent · {o.waiting_leads} waiting
+          {o.audits_today}
+          {o.daily_limit ? `/${o.daily_limit}` : ""} audited today · {o.audited_total ?? 0} audited in total ·{" "}
+          {o.sent_total} sent · {o.waiting_to_send ? `${o.waiting_to_send} waiting to send · ` : ""}
+          {o.waiting_leads} leads left
           {o.running ? ` · ${o.running} running` : ""}
-          {o.failed_today ? ` · ${o.failed_today} failed today` : ""}
+          {o.failed_total ? ` · ${o.failed_total} audits failed` : ""}
+          {o.send_failed_total ? ` · ${o.send_failed_total} sends failed` : ""}
           {o.auto_send ? "" : " · review mode"}
         </span>
       ) : (
@@ -153,11 +170,11 @@ export function FileOutreachControls({
         <label className="flex items-center gap-1 text-xs text-muted">
           per day
           <Input
-            className="h-7 w-16 py-0.5"
+            className="h-7 w-20 py-0.5"
             type="number"
-            min={1}
-            max={500}
-            value={limit}
+            min={0}
+            placeholder="no limit"
+            value={limit === "0" ? "" : limit}
             onChange={(e) => setDraft(e.target.value)}
             onBlur={saveLimit}
             onKeyDown={(e) => {
@@ -165,6 +182,11 @@ export function FileOutreachControls({
             }}
           />
         </label>
+      ) : null}
+      {o.failed_total ? (
+        <Button variant="secondary" disabled={busy} onClick={() => send("retry_failed", {}, "Failed audits will be tried again")}>
+          Retry failed audits
+        </Button>
       ) : null}
       <label className="flex items-center gap-1 text-xs text-muted">
         from

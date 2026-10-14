@@ -16,7 +16,7 @@ from pathlib import Path
 from bs4 import BeautifulSoup
 from email_validator import EmailNotValidError, validate_email
 from fastapi import HTTPException
-from sqlalchemy import or_
+from sqlalchemy import or_, update
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
@@ -781,6 +781,23 @@ def _html_to_text(html: str) -> str:
     return text
 
 
+def _audit_campaign(db: Session, audit: WebsiteAudit):
+    if audit.trigger != "campaign":
+        return None
+    from app.services.campaigns import campaign_for_audit
+
+    try:
+        return campaign_for_audit(db, audit)
+    except Exception:
+        return None
+
+
+def campaign_rotation(campaign) -> dict:
+    from app.services.campaigns import campaign_rotation as rotation
+
+    return rotation(campaign)
+
+
 def audit_schedule(db: Session, audit: WebsiteAudit) -> dict | None:
     """The sending schedule of the scrape file / campaign this audit belongs to (None: your sending hours)."""
     try:
@@ -871,12 +888,17 @@ def send_audit(
     if not manual:
         # The file's / campaign's own schedule in the lead's time zone, else your sending hours
         deliverability.require_send_time(db, user_id, audit_schedule(db, audit), lead)
-    # The chosen inbox, or (none chosen / "" = automatic) the connected inbox with the most room today
+    # The chosen inbox, or (none chosen / "" = automatic) the eligible inbox with the most room today,
+    # among the accounts its campaign may use (rotation mode / chosen accounts)
+    campaign = _audit_campaign(db, audit)
+    rotation = campaign_rotation(campaign) if campaign else {"mode": "auto", "account_ids": []}
     account: EmailAccount = deliverability.sending_account(
         db,
         user_id,
         (email_account_id if email_account_id is not None else audit.email_account_id) or None,
         automatic=not manual,
+        allowed_ids=rotation["account_ids"] or None,
+        mode=rotation["mode"],
     )
     if daily_limit_reached(db, account):
         raise deliverability.limit_reached_error(account)
@@ -913,9 +935,19 @@ def send_audit(
         rfc_message_id=rfc_message_id,
         followups_enabled=_followups_for(db, audit, settings),
     )
+    # One send at a time per audit: claim it atomically, so a retry, the poller and a click can't send it twice
+    claimed = db.execute(
+        update(WebsiteAudit)
+        .where(WebsiteAudit.id == audit.id, WebsiteAudit.status.in_(list(SENDABLE_STATUSES)))
+        .values(status="sending", step=STEP_LABELS["sending"], error_message="")
+    ).rowcount
+    if not claimed:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="This email is already being sent.")
+    message.campaign_id = campaign.id if campaign else None  # per-account campaign report
     db.add(message)
+    db.refresh(audit)
     audit.email_subject, audit.email_html, audit.recipient_email = subject, body_html, recipient
-    audit.status, audit.step, audit.error_message = "sending", STEP_LABELS["sending"], ""
     audit.email_account_id = account.id
     audit.send_attempts = (audit.send_attempts or 0) + 1
     db.commit()
@@ -938,9 +970,14 @@ def send_audit(
             headers={"Message-ID": rfc_message_id},  # no bulk-mail headers: 1-to-1 email, not a list
         )
     except GmailSendError as exc:
-        message.status, message.error_message = "failed", str(exc)
+        message.status, message.error_message, message.error_kind = "failed", str(exc), exc.kind
         audit.status, audit.step, audit.error_message = "send_failed", STEP_LABELS["send_failed"], str(exc)
+        audit.send_retryable = exc.retryable  # permanent failures are never retried automatically
         db.commit()
+        if exc.kind == "recipient":
+            from app.services.account_health import suppress_refused_recipient
+
+            suppress_refused_recipient(db, user_id, audit.lead_id, recipient)
         log.error("audit_send_failed", error=str(exc), retryable=exc.retryable)
         _sync_campaign(db, audit)
         raise AuditSendError(str(exc)) from exc

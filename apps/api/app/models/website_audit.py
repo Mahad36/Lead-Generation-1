@@ -34,6 +34,8 @@ class WebsiteAudit(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     auto_send: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     trigger: Mapped[str] = mapped_column(String(16), default="manual", index=True, nullable=False)
     send_attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    # False after a permanent send failure (bad address, rejected): never retried automatically
+    send_retryable: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     site_data: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
     performance: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
     report: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)

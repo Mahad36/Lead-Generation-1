@@ -1,7 +1,8 @@
 "use client";
 
+import { DEFAULT_ROTATION, EmailRotation, LaunchSummary, rotationForApi, type Rotation } from "@/components/email-rotation";
 import { DEFAULT_SCHEDULE, SchedulePicker, scheduleForApi, type Schedule } from "@/components/schedule-picker";
-import { GmailSignatureStatus, SendFrom } from "@/components/send-from";
+import { GmailSignatureStatus } from "@/components/send-from";
 import { Badge, Button, Card, Input, Label, Textarea } from "@/components/ui";
 import { api } from "@/lib/api";
 import { SAMPLE_LEADS_CSV } from "@/lib/constants";
@@ -37,7 +38,6 @@ function NewCampaignForm() {
   const [templates, setTemplates] = useState<any[]>([]);
   const [files, setFiles] = useState<LeadFile[]>([]);
   const [fileKeyValue, setFileKeyValue] = useState("");
-  const [accountId, setAccountId] = useState("");
   const [templateId, setTemplateId] = useState("");
   const [subject, setSubject] = useState("Quick idea for {{business_name}}");
   const [body, setBody] = useState(
@@ -54,6 +54,10 @@ function NewCampaignForm() {
   // When the emails go out: set hours in each lead's own time (suggested per country), or my sending hours
   const [schedule, setSchedule] = useState<Schedule>(DEFAULT_SCHEDULE);
   const [scheduleCountry, setScheduleCountry] = useState("United States");
+  // Single account, or rotation across connected Gmails by their own safe capacity
+  const [rotation, setRotation] = useState<Rotation>(DEFAULT_ROTATION);
+  // Audit campaigns: audits per day (0 = no limit), separate from sending capacity
+  const [auditLimit, setAuditLimit] = useState(0);
   const [scheduledAt, setScheduledAt] = useState("");
   const [saving, setSaving] = useState(false);
   const [uploading, setUploading] = useState(false);
@@ -107,7 +111,8 @@ function NewCampaignForm() {
   function payload() {
     return {
       name,
-      email_account_id: accountId || undefined, // none: the default account
+      ...rotationForApi(rotation),
+      audit_limit: auditLimit || undefined,
       outreach_mode: outreachMode,
       add_signature: addSignature,
       followups,
@@ -147,7 +152,7 @@ function NewCampaignForm() {
       .then(setPreview)
       .catch(() => setPreview(null));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [canSend, selected?.id, selected?.ready_leads, mode]);
+  }, [canSend, selected?.id, selected?.ready_leads, mode, JSON.stringify(rotation), auditLimit, outreachMode]);
 
   async function importCsv(file: File) {
     setUploading(true);
@@ -373,7 +378,7 @@ function NewCampaignForm() {
                   Each email gets the signature you set in the sending Gmail itself (read from Gmail, never another
                   account&apos;s).
                 </span>
-                <GmailSignatureStatus accountId={accountId} />
+                <GmailSignatureStatus accountId={rotation.enabled ? "" : rotation.accountId} />
               </span>
             </label>
             <label className="mt-3 flex cursor-pointer items-start gap-2 text-sm">
@@ -400,7 +405,23 @@ function NewCampaignForm() {
         </div>
         {accounts.length ? (
           <div className="grid gap-3 sm:grid-cols-2">
-            <SendFrom value={accountId} onChange={setAccountId} />
+            <EmailRotation value={rotation} onChange={setRotation} />
+            {audit ? (
+              <label className="flex flex-wrap items-center gap-2 text-sm sm:col-span-2">
+                Audits per day
+                <input
+                  type="number"
+                  min={0}
+                  placeholder="No limit"
+                  className="h-8 w-28 rounded-md border border-border bg-card px-2"
+                  value={auditLimit || ""}
+                  onChange={(e) => setAuditLimit(Math.max(0, Number(e.target.value) || 0))}
+                />
+                <span className="text-xs text-muted">
+                  Empty = no limit. Separate from sending: audited emails wait for an inbox with room.
+                </span>
+              </label>
+            ) : null}
             {audit ? null : (
               <div>
                 <Label>Email</Label>
@@ -471,13 +492,14 @@ function NewCampaignForm() {
             This will {audit ? "audit and email" : "send"} <span className="font-medium">{preview.will_send}</span>{" "}
             {audit ? "leads (those with a website)" : "emails"}
             {preview.previously_contacted ? ` · ${preview.previously_contacted} already contacted` : ""}
-            {preview.daily_limit ? ` · daily limit ${preview.daily_limit}` : ""}.
+            .
           </p>
         ) : (
           <p className="text-sm text-muted">
             {mode === "leads" ? "Choose a lead file to follow up." : "Upload or select a CSV with ready leads."}
           </p>
         )}
+        <LaunchSummary s={preview?.summary} />
         <div className="flex flex-wrap gap-2">
           <Button disabled={!canSend || saving} onClick={() => create(true).catch((e) => toast.error(e.message))}>
             {saving

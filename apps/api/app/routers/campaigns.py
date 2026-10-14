@@ -31,7 +31,9 @@ def list_campaigns(user: User = Depends(get_current_user), db: Session = Depends
 @router.post("/preview", response_model=CampaignPreview)
 def preview(payload: CampaignCreate, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     lead_ids = campaign_service.resolve_campaign_lead_ids(db, user.id, payload)
-    return campaign_service.campaign_preview(db, user.id, lead_ids, payload.daily_limit)
+    preview = campaign_service.campaign_preview(db, user.id, lead_ids, payload.daily_limit)
+    preview["summary"] = campaign_service.launch_summary(db, user.id, lead_ids, payload)
+    return preview
 
 
 @router.post("", response_model=CampaignOut)
@@ -60,7 +62,9 @@ def get_campaign(campaign_id: str, user: User = Depends(get_current_user), db: S
 
 
 class CampaignAccountIn(BaseModel):
-    email_account_id: str | None = None  # "" / None: the default account
+    email_account_id: str | None = None  # the account for "single"
+    mode: str | None = None  # single | auto | selected | health (None: single when an account is given, else auto)
+    account_ids: list[str] = []  # for "selected"
 
 
 @router.post("/{campaign_id}/email-account", response_model=CampaignOut)
@@ -71,8 +75,16 @@ def change_email_account(
     db: Session = Depends(get_db),
 ):
     """Send the rest of this campaign from another of your email accounts."""
-    campaign = campaign_service.set_campaign_email_account(db, user.id, campaign_id, payload.email_account_id)
+    campaign = campaign_service.set_campaign_email_account(
+        db, user.id, campaign_id, payload.email_account_id, payload.mode, payload.account_ids
+    )
     return campaign_service.serialize_campaign(db, campaign)
+
+
+@router.get("/{campaign_id}/accounts")
+def campaign_accounts(campaign_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Which account sent what: attempted, sent, failed (by reason), pending; per account and overall."""
+    return campaign_service.campaign_account_report(db, user.id, campaign_id)
 
 
 @router.get("/{campaign_id}/leads", response_model=list[CampaignLeadOut])

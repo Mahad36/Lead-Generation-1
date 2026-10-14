@@ -1,7 +1,7 @@
 "use client";
 
 import { OutreachTable } from "@/components/outreach";
-import { automaticLabel, useEmailAccounts } from "@/components/send-from";
+import { useEmailAccounts } from "@/components/send-from";
 import { Badge, Button, Card, Input, Textarea } from "@/components/ui";
 import { api } from "@/lib/api";
 import { CAMPAIGN_LEAD_STATUS, CAMPAIGN_STATUS } from "@/lib/constants";
@@ -60,12 +60,19 @@ export default function CampaignDetailPage() {
     }
   }
 
-  async function changeAccount(accountId: string) {
+  async function changeAccount(choice: string) {
+    // "mode:auto" / "mode:health" = rotation; an account id = everything from that account
+    const mode = choice.startsWith("mode:") ? choice.slice(5) : "single";
     setBusy(true);
     try {
-      await api(`/api/campaigns/${id}/email-account`, { method: "POST", body: JSON.stringify({ email_account_id: accountId }) });
-      const address = accounts?.find((a) => a.id === accountId)?.email_address;
-      toast.success(`The rest of this campaign sends from ${address || "your default account"}`);
+      await api(`/api/campaigns/${id}/email-account`, {
+        method: "POST",
+        body: JSON.stringify(mode === "single" ? { email_account_id: choice, mode } : { mode }),
+      });
+      const address = accounts?.find((a) => a.id === choice)?.email_address;
+      toast.success(
+        mode === "single" ? `The rest of this campaign sends from ${address}` : "The rest of this campaign rotates across your inboxes"
+      );
       await load();
     } catch (e) {
       toast.error((e as Error).message);
@@ -155,11 +162,19 @@ export default function CampaignDetailPage() {
         <span className="text-muted">Sending from</span>
         <select
           className="rounded-md border border-border bg-card px-2 py-1 text-sm"
-          value={campaign.rotate ? "" : campaign.email_account_id || ""}
+          value={
+            campaign.rotation?.mode && campaign.rotation.mode !== "single"
+              ? `mode:${campaign.rotation.mode}`
+              : campaign.email_account_id || ""
+          }
           disabled={busy || accounts === null || ["completed", "stopped"].includes(campaign.status)}
           onChange={(e) => changeAccount(e.target.value)}
         >
-          <option value="">{automaticLabel(accounts)}</option>
+          <option value="mode:auto">Automatic rotation (by each inbox&apos;s room left)</option>
+          <option value="mode:health">Health-based rotation (healthier inboxes first)</option>
+          {campaign.rotation?.mode === "selected" ? (
+            <option value="mode:selected">Selected accounts ({campaign.rotation.account_ids.length})</option>
+          ) : null}
           {(accounts || [])
             .filter((a) => a.status === "connected" || a.id === campaign.email_account_id)
             .map((a) => (
@@ -171,7 +186,14 @@ export default function CampaignDetailPage() {
         </select>
         <span className="text-xs text-muted">Emails not sent yet switch to the account you pick.</span>
       </label>
-      {campaign.paused_reason ? <p className="text-sm text-danger">{campaign.paused_reason.replaceAll("_", " ")}</p> : null}
+      {campaign.paused_reason ? (
+        <p className="text-sm text-danger">
+          {campaign.paused_reason === "no_eligible_inbox"
+            ? campaign.error_message || "Paused: no eligible inbox can send right now."
+            : campaign.paused_reason.replaceAll("_", " ")}
+        </p>
+      ) : null}
+      <AccountReport campaignId={id} refreshKey={campaign.sent_count} />
       {writing && sending && !audit ? <p className="text-sm text-muted">Writing personalized emails, then sending them one by one.</p> : null}
       {audit && sending ? (
         <p className="text-sm text-muted">
@@ -282,5 +304,78 @@ export default function CampaignDetailPage() {
         {leads.length === 0 ? <p className="text-muted">No leads in this campaign.</p> : null}
       </div>
     </div>
+  );
+}
+
+type Report = {
+  rotation: { mode: string; account_ids: string[] };
+  accounts: {
+    account_id: string;
+    email_address: string;
+    status: string;
+    attempted: number;
+    sent: number;
+    failed: number;
+    followups_sent: number;
+    bounced: number;
+    replied: number;
+    failures: Record<string, number>;
+  }[];
+  overall: { leads: number; sent: number; failed: number; skipped: number; pending: number };
+};
+
+/** Which account sent what for this campaign, and the overall progress. */
+function AccountReport({ campaignId, refreshKey }: { campaignId: string; refreshKey: number }) {
+  const [report, setReport] = useState<Report | null>(null);
+  useEffect(() => {
+    api<Report>(`/api/campaigns/${campaignId}/accounts`)
+      .then(setReport)
+      .catch(() => setReport(null));
+  }, [campaignId, refreshKey]);
+  if (!report) return null;
+  const o = report.overall;
+  return (
+    <Card className="space-y-2 text-sm">
+      <div className="font-medium">Sending by account</div>
+      <p className="text-xs text-muted">
+        {o.leads} leads · {o.sent} sent · {o.failed} failed · {o.skipped} skipped · {o.pending} still pending
+      </p>
+      {report.accounts.length ? (
+        <div className="overflow-x-auto">
+          <table className="w-full text-left text-xs">
+            <thead className="text-muted">
+              <tr>
+                <th className="py-1 pr-2">Account</th>
+                <th className="py-1 pr-2">Status</th>
+                <th className="py-1 pr-2">Attempted</th>
+                <th className="py-1 pr-2">Sent</th>
+                <th className="py-1 pr-2">Follow-ups</th>
+                <th className="py-1 pr-2">Failed</th>
+                <th className="py-1 pr-2">Bounced</th>
+                <th className="py-1">Replied</th>
+              </tr>
+            </thead>
+            <tbody>
+              {report.accounts.map((a) => (
+                <tr key={a.account_id} className="border-t border-border">
+                  <td className="py-1 pr-2">{a.email_address}</td>
+                  <td className="py-1 pr-2">{a.status}</td>
+                  <td className="py-1 pr-2">{a.attempted}</td>
+                  <td className="py-1 pr-2">{a.sent}</td>
+                  <td className="py-1 pr-2">{a.followups_sent}</td>
+                  <td className="py-1 pr-2" title={Object.entries(a.failures).map(([k, n]) => `${n} ${k}`).join(", ")}>
+                    {a.failed}
+                  </td>
+                  <td className="py-1 pr-2">{a.bounced}</td>
+                  <td className="py-1">{a.replied}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <p className="text-xs text-muted">Nothing sent yet.</p>
+      )}
+    </Card>
   );
 }

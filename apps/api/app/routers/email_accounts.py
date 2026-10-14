@@ -49,12 +49,15 @@ def list_accounts(user: User = Depends(get_current_user), db: Session = Depends(
         .order_by(EmailAccount.created_at.desc())
         .all()
     )
+    from app.services.account_health import assess, health_summary
     from app.services.deliverability import effective_daily_limit
     from app.services.gmail_signature import signature_info
     from app.services.warmup import warmup_stats
 
     out = []
     for account in accounts:
+        if account.health_checked_at is None and account.status in ("connected", "expired"):
+            assess(db, account)  # first look; afterwards every few minutes in the background
         sent_today = sent_today_count(db, account)
         limit_today = effective_daily_limit(account)
         status = account.status
@@ -78,6 +81,8 @@ def list_accounts(user: User = Depends(get_current_user), db: Session = Depends(
                 "warmup": warmup_stats(db, account) if _smtp_payload(account) else None,
                 "health": account.health or {},
                 "gmail_signature": signature_info(account),
+                "health_status": account.health_status,
+                "health_summary": health_summary(db, account),
                 "last_successful_send_at": account.last_successful_send_at,
                 "last_error": account.last_error,
                 "provider": account.provider,
@@ -242,9 +247,20 @@ def resume_account(account_id: str, user: User = Depends(get_current_user), db: 
 
     account = _own_account(db, user, account_id)
     account.paused_reason, account.paused_at = "", None
+    if "daily sending limit" not in (account.health_reason or ""):
+        # Clear the app's own backoff; Gmail's 24-hour quota pause is kept until it really ends
+        account.restricted_until, account.consecutive_failures = None, 0
+    db.commit()
+    from app.services.account_health import assess
+
+    assess(db, account)
     waiting = (
         db.query(Campaign)
-        .filter(Campaign.user_id == user.id, Campaign.status == "paused", Campaign.paused_reason == "inbox_paused_bounces")
+        .filter(
+            Campaign.user_id == user.id,
+            Campaign.status == "paused",
+            Campaign.paused_reason.in_(["inbox_paused_bounces", "no_eligible_inbox"]),
+        )
         .all()
     )
     for campaign in waiting:
@@ -280,6 +296,19 @@ def refresh_gmail_signature(account_id: str, user: User = Depends(get_current_us
     from app.services.gmail_signature import refresh_signature
 
     return refresh_signature(db, _own_account(db, user, account_id))
+
+
+@router.post("/{account_id}/health/refresh")
+def refresh_health(account_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Recalculate this account's status and safe capacity now (Sent-folder count included)."""
+    from app.services.account_health import assess, refresh_sent_24h
+
+    account = _own_account(db, user, account_id)
+    try:
+        refresh_sent_24h(db, account)
+    except Exception:
+        db.rollback()
+    return assess(db, account)
 
 
 @router.post("/{account_id}/domain-check")

@@ -35,7 +35,7 @@ BOUNCE_MIN_SENT = 20  # ...once at least this many were sent
 BOUNCE_PAUSE_RATE = 0.05  # pause above 5% bounces
 
 WAITING_FOR_WINDOW = "Waiting: outside sending hours (sends automatically when they start)"
-WAITING_FOR_INBOX = "Waiting: the sending inbox is paused (too many bounces). Resume it in Email setup."
+WAITING_FOR_INBOX = "Waiting: no eligible inbox can send right now (see Email setup)"
 WAITING_FOR_SPACING = "Waiting: spacing emails out (sends in a few minutes)"
 WAITING_FOR_SCHEDULE = "Scheduled: sends at the chosen time in the lead's time zone"
 
@@ -62,12 +62,16 @@ def _settings(db: Session, user_id: str) -> UserSettings | None:
 # ---------------------------------------------------------------- daily limits, ramp-up, rotation
 
 
-def effective_daily_limit(account: EmailAccount, today: date | None = None) -> int:
-    """Today's limit: the account's own, lower while a new inbox ramps up."""
+def effective_daily_limit(account: EmailAccount, today: date | None = None, use_recommended: bool = True) -> int:
+    """Today's limit: your own for the account, lower while a new inbox ramps up, and lower again when its health
+    calls for it (account_health.assess sets recommended_limit; 0 = paused)."""
     limit = account.daily_limit or 0
     if account.ramp_started_on and limit:
         days = max(((today or local_today()) - account.ramp_started_on).days, 0)
         limit = min(limit, RAMP_START + RAMP_STEP * days)
+    recommended = getattr(account, "recommended_limit", None)
+    if use_recommended and recommended is not None:
+        limit = min(limit, recommended) if limit else recommended
     return limit
 
 
@@ -80,25 +84,33 @@ def remaining_today(db: Session, account: EmailAccount) -> int:
     return max(limit - sent_today_count(db, account), 0)
 
 
-def account_ready(account: EmailAccount | None) -> bool:
-    return bool(account and account.status == "connected" and not account.paused_reason)
+def account_ready(account: EmailAccount | None, now: datetime | None = None) -> bool:
+    """Connected, not paused, not in a backoff / restriction window, login working."""
+    if not account or account.status != "connected" or account.paused_reason:
+        return False
+    if getattr(account, "health_status", "") == "reconnect":
+        return False
+    until = getattr(account, "restricted_until", None)
+    return not (until and until > (now or datetime.now(UTC)))
 
 
-def pick_sending_account(db: Session, user_id: str) -> EmailAccount | None:
-    """Inbox rotation: the connected, unpaused inbox with the most room today (ties: the default account).
+def pick_sending_account(
+    db: Session, user_id: str, allowed_ids: list[str] | None = None, mode: str = "auto"
+) -> EmailAccount | None:
+    """Inbox rotation: the eligible inbox with the most room today (account_health.rank_accounts).
 
-    When every inbox is full, the one that would have been used is returned anyway, so the caller's daily-limit
-    check holds the email until tomorrow.
+    allowed_ids limits it to the accounts chosen for a campaign; mode "health" prefers healthier accounts. When every
+    eligible inbox is full, one is returned anyway so the caller's daily-limit check holds the email for later.
+    None when no inbox is eligible at all (paused, restricted, reconnect needed).
     """
-    accounts = [
-        a
-        for a in db.query(EmailAccount).filter(EmailAccount.user_id == user_id, EmailAccount.status == "connected")
-        if not a.paused_reason
-    ]
+    from app.services.account_health import rank_accounts
+
+    query = db.query(EmailAccount).filter(EmailAccount.user_id == user_id, EmailAccount.status == "connected")
+    accounts = [a for a in query if (not allowed_ids or a.id in allowed_ids) and account_ready(a)]
     if not accounts:
         return None
-    ranked = sorted(accounts, key=lambda a: (remaining_today(db, a), a.is_default), reverse=True)
-    return ranked[0]
+    ranked = rank_accounts([(a, remaining_today(db, a)) for a in accounts], mode)
+    return ranked[0] if ranked else max(accounts, key=lambda a: a.is_default)
 
 
 # ---------------------------------------------------------------- spacing between emails
@@ -374,26 +386,37 @@ def address_problem(db: Session, user_id: str, email: str) -> str:
 
 
 
-def sending_account(db: Session, user_id: str, chosen_id: str | None, *, automatic: bool) -> EmailAccount:
-    """The inbox that sends this email: the chosen one, or (none chosen) the rotation's pick.
+def sending_account(
+    db: Session,
+    user_id: str,
+    chosen_id: str | None,
+    *,
+    automatic: bool,
+    allowed_ids: list[str] | None = None,
+    mode: str = "auto",
+) -> EmailAccount:
+    """The inbox that sends this email: the chosen one, or (none chosen) the rotation's pick among allowed_ids.
 
-    Automatic sends wait (SendDeferred) when the inbox they need is paused; a manual send says why it can't go.
+    Automatic sends wait (SendDeferred) when no inbox they may use is eligible; a manual send says why it can't go.
     """
     from app.services.campaigns import resolve_email_account
 
     if chosen_id:
         account = resolve_email_account(db, user_id, chosen_id)
-        if account.paused_reason:
-            message = f"{account.email_address} is paused: {account.paused_reason}"
+        if not account_ready(account):
+            message = f"{account.email_address} can't send right now: {account.paused_reason or account.health_reason}"
             if automatic:
                 raise SendDeferred(message, WAITING_FOR_INBOX)
-            raise HTTPException(status_code=400, detail=f"{message} Resume it in Email setup, or choose another inbox.")
+            raise HTTPException(status_code=400, detail=f"{message} Check it in Email setup, or choose another inbox.")
         return account
-    account = pick_sending_account(db, user_id)
+    account = pick_sending_account(db, user_id, allowed_ids, mode)
     if account:
         return account
     resolve_email_account(db, user_id, None)  # no connected inbox at all: "Connect Gmail first"
-    message = "Every connected inbox is paused because of bounces. Resume one in Email setup."
+    message = (
+        "No eligible inbox can send right now (paused, restricted or needing reconnection). "
+        "The emails wait; see Email setup."
+    )
     if automatic:
         raise SendDeferred(message, WAITING_FOR_INBOX)
     raise HTTPException(status_code=400, detail=message)

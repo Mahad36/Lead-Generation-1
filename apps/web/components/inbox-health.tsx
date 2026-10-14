@@ -7,6 +7,30 @@ import { Loader2 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 
+export type HealthSummary = {
+  status: "healthy" | "monitoring" | "reduced" | "paused" | "reconnect";
+  label: string;
+  reason: string;
+  recommended_today: number | null;
+  your_daily_limit: number;
+  limit_today: number;
+  sent_today: number;
+  remaining_today: number;
+  provider_limit: number | null;
+  sent_last_24h: number;
+  sent_last_24h_source: string;
+  provider_remaining_estimate: number | null;
+  bounce_rate: number | null;
+  bounces_in_last: [number, number] | null;
+  unsubscribe_rate: number | null;
+  failures_24h: Record<string, number>;
+  restricted_until: string | null;
+  checked_at: string | null;
+  unavailable: string[];
+};
+
+export const HEALTH_TONE = { healthy: "ok", monitoring: "default", reduced: "warn", paused: "bad", reconnect: "bad" } as const;
+
 type Placement = { at: string; running: boolean; subject?: string; error?: string; results: { to: string; landed: string }[] };
 type DomainCheck = {
   at: string;
@@ -29,6 +53,7 @@ export type InboxHealthAccount = {
   warmup_enabled?: boolean;
   warmup?: { sent_today: number; daily_target: number; last_7_days: Record<string, number> } | null;
   health?: { domain?: DomainCheck; placement?: Placement };
+  health_summary?: HealthSummary;
   gmail_signature?: {
     found: boolean;
     html: string;
@@ -79,6 +104,7 @@ export function InboxHealth({ account, inboxes, onChange }: { account: InboxHeal
 
   return (
     <div className="mt-3 space-y-2 border-t border-border pt-3 text-sm">
+      {a.health_summary ? <AccountHealth h={a.health_summary} busy={busy} onRecheck={() => run("health/refresh", "")} /> : null}
       {a.paused_reason ? (
         <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-red-300 bg-red-50 p-2 text-red-800 dark:border-red-800 dark:bg-red-950/40 dark:text-red-200">
           <span>{a.paused_reason}</span>
@@ -203,6 +229,74 @@ function GmailSignature({ account, busy, onRefresh }: { account: InboxHealthAcco
           Emails from this account go out without a signature until one is found.
         </p>
       )}
+    </div>
+  );
+}
+
+const pct = (v: number | null) => (v === null || v === undefined ? "not enough data" : `${(v * 100).toFixed(1)}%`);
+const FAILURE_LABEL: Record<string, string> = {
+  temporary: "busy / try later",
+  rate_limited: "rate-limited",
+  quota: "daily quota reached",
+  auth: "login rejected",
+  recipient: "bad address",
+  rejected: "blocked by policy",
+  other: "other",
+};
+
+/** Sending health from the evidence the app can see, today's safe capacity, and what Gmail doesn't share. */
+function AccountHealth({ h, busy, onRecheck }: { h: HealthSummary; busy: string; onRecheck: () => void }) {
+  const failures = Object.entries(h.failures_24h || {}).filter(([, n]) => n);
+  return (
+    <div className="space-y-2 rounded-md border border-border p-2">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <span className="flex items-center gap-2">
+          <span className="font-medium">Sending health</span>
+          <Badge tone={HEALTH_TONE[h.status] || "default"}>{h.label}</Badge>
+        </span>
+        <Button variant="secondary" disabled={!!busy} onClick={onRecheck}>
+          {busy === "health/refresh" ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+          Recheck
+        </Button>
+      </div>
+      {h.reason ? <p className="text-xs text-muted">{h.reason}</p> : null}
+      <div className="grid gap-x-6 gap-y-1 text-xs sm:grid-cols-2">
+        <div>
+          Safe capacity today: <span className="font-medium">{h.recommended_today ?? h.limit_today}</span>
+          {h.your_daily_limit ? ` (your limit ${h.your_daily_limit})` : ""}
+        </div>
+        <div>
+          Sent today: <span className="font-medium">{h.sent_today}</span> · left today:{" "}
+          <span className="font-medium">{h.remaining_today}</span>
+        </div>
+        <div>
+          Last 24 hours: <span className="font-medium">{h.sent_last_24h}</span>
+          {h.provider_limit ? ` of Gmail's ${h.provider_limit}` : ""} ({h.sent_last_24h_source})
+        </div>
+        <div>
+          Gmail quota left (estimate):{" "}
+          <span className="font-medium">{h.provider_remaining_estimate ?? "unknown for this provider"}</span>
+        </div>
+        <div>
+          Bounce rate: {pct(h.bounce_rate)}
+          {h.bounces_in_last ? ` (${h.bounces_in_last[0]} of last ${h.bounces_in_last[1]})` : ""}
+        </div>
+        <div>Unsubscribe requests: {pct(h.unsubscribe_rate)}</div>
+        <div className="sm:col-span-2">
+          Gmail errors (24h):{" "}
+          {failures.length ? failures.map(([k, n]) => `${n} ${FAILURE_LABEL[k] || k}`).join(", ") : "none"}
+          {h.restricted_until ? ` · paused until ${formatDate(h.restricted_until)}` : ""}
+        </div>
+      </div>
+      <details className="text-xs text-muted">
+        <summary className="cursor-pointer">What Gmail doesn&apos;t share</summary>
+        <ul className="mt-1 list-disc space-y-0.5 pl-5">
+          {h.unavailable.map((item) => (
+            <li key={item}>{item}</li>
+          ))}
+          <li>The status summarises the evidence above; it is not a guarantee of how Gmail rates this account.</li>
+        </ul>
+      </details>
     </div>
   );
 }

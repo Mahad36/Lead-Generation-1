@@ -324,7 +324,7 @@ def send_reply(db: Session, user_id: str, root_id: str, body: str) -> dict:
             headers=headers,
         )
     except GmailSendError as exc:
-        message.status, message.error_message = "failed", str(exc)
+        message.status, message.error_message, message.error_kind = "failed", str(exc), exc.kind
         db.commit()
         raise HTTPException(status_code=502, detail=f"The reply was not sent: {exc}") from exc
     now = datetime.now(UTC)

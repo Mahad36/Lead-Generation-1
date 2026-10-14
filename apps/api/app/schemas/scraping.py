@@ -44,7 +44,7 @@ class ScrapingJobCreate(BaseModel):
     html_body: str | None = None
     # Automatic outreach for this file: "auto" (audit + send), "review" (audit, I send), "off"
     outreach_mode: Literal["auto", "review", "off"] = "off"
-    outreach_daily_limit: int = Field(default=10, ge=1, le=500)
+    outreach_daily_limit: int = Field(default=0, ge=0, le=100000)  # audits per day; 0 = no limit
     # The email account this file's outreach sends from (empty: your default account)
     outreach_email_account_id: str | None = None
     # Follow-ups (AI & settings -> Sending) after each first email from this file
@@ -54,9 +54,9 @@ class ScrapingJobCreate(BaseModel):
 
 
 class OutreachAction(BaseModel):
-    action: Literal["start", "pause", "resume", "stop", "update"]
+    action: Literal["start", "pause", "resume", "stop", "update", "retry_failed"]
     auto_send: bool | None = None
-    daily_limit: int | None = Field(default=None, ge=1, le=500)
+    daily_limit: int | None = Field(default=None, ge=0, le=100000)  # 0 = no daily audit limit
     # Send from this account ("" = your default account); left out = unchanged
     email_account_id: str | None = None
 
