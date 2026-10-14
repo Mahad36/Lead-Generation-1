@@ -39,7 +39,7 @@ class CampaignCreate(BaseModel):
     schedule: ScheduleIn | None = None
     # Email rotation: single (email_account_id) | auto (all eligible accounts by remaining capacity) |
     # selected (only account_ids) | health (all eligible accounts, healthier first). None: auto unless an account is set.
-    rotation_mode: Literal["single", "auto", "selected", "health"] | None = None
+    rotation_mode: Literal["single", "auto", "selected", "health", "even"] | None = None
     account_ids: list[str] = []
     # Audit campaigns: audits per day (None / 0 = no limit); separate from how many emails the inboxes can send
     audit_limit: int | None = Field(default=None, ge=0, le=100000)

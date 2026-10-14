@@ -46,6 +46,8 @@ export type Protection = {
   held: { audits: number; campaign_emails: number; total: number };
   reassigned_today: number;
   events: { action: string; at: string; details: Record<string, string> }[];
+  next_send_at?: string;
+  delay_seconds?: [number, number];
 };
 
 const STAGE_LABEL: Record<string, string> = {
@@ -93,6 +95,20 @@ function ProtectionPanel({ p }: { p: Protection }) {
         <div>
           Moved to another inbox today: <span className="font-medium">{p.reassigned_today}</span>
         </div>
+        {p.next_send_at ? (
+          <div>
+            Next email from this inbox:{" "}
+            <span className="font-medium">
+              {new Date(p.next_send_at).getTime() <= Date.now() ? "ready now" : formatDate(p.next_send_at)}
+            </span>
+          </div>
+        ) : null}
+        {p.delay_seconds ? (
+          <div>
+            Delay between emails: {Math.round(p.delay_seconds[0] / 6) / 10}-{Math.round(p.delay_seconds[1] / 6) / 10} min,
+            random
+          </div>
+        ) : null}
       </div>
       {p.events.length ? (
         <details>

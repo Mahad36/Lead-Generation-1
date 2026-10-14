@@ -7,7 +7,7 @@ import Link from "next/link";
 
 export type Rotation = {
   enabled: boolean;
-  mode: "auto" | "selected" | "health"; // when enabled
+  mode: "auto" | "selected" | "health" | "even"; // when enabled
   accountIds: string[]; // for "selected"
   accountId: string; // when not enabled ("" = default account)
 };
@@ -24,10 +24,19 @@ export function rotationForApi(r: Rotation) {
 type Account = EmailAccount & { health_status?: string; health_summary?: HealthSummary };
 
 const MODES = [
-  ["auto", "Automatic", "Every eligible account, each getting emails in proportion to the room it has left today."],
+  ["auto", "Automatic", "Every safe account; ones with more room left today take more emails."],
+  ["even", "Take turns", "Every safe account in turn, one email each, as evenly as their limits allow."],
   ["selected", "Selected accounts", "Only the accounts you tick below, by remaining room."],
-  ["health", "Health-based", "Every eligible account, healthier ones first (Healthy, then Monitoring, then Reduced)."],
+  ["health", "Health-based", "Every safe account, healthier ones first (Healthy, then Monitoring)."],
 ] as const;
+
+/** "in 3 min" / "now" for an inbox's next allowed send. */
+function nextIn(iso?: string | null) {
+  if (!iso) return "";
+  const seconds = Math.round((new Date(iso).getTime() - Date.now()) / 1000);
+  if (seconds <= 0) return "now";
+  return seconds < 60 ? `in ${seconds} s` : `in ${Math.round(seconds / 60)} min`;
+}
 
 /** Single account, or rotation across connected Gmails by their own safe capacity (never a blind round-robin). */
 export function EmailRotation({ value, onChange }: { value: Rotation; onChange: (next: Rotation) => void }) {
@@ -54,14 +63,15 @@ export function EmailRotation({ value, onChange }: { value: Rotation; onChange: 
         <span>
           <span className="font-medium">Email rotation</span>
           <span className="block text-xs text-muted">
-            Spread this campaign across your connected Gmails according to each one&apos;s own safe capacity. It shares
-            the load; it never lets an account send more than its own limit.
+            Spread these emails across your connected Gmails. Each email goes from an inbox that is safe to send from
+            and ready now; each inbox keeps its own random delay between emails (AI &amp; settings → Sending) and never
+            sends more than its own limit. Inboxes held by health protection are skipped.
           </span>
         </span>
       </label>
 
       {value.enabled ? (
-        <div className="grid gap-2 sm:grid-cols-3">
+        <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
           {MODES.map(([mode, title, hint]) => (
             <label
               key={mode}
@@ -100,13 +110,14 @@ export function EmailRotation({ value, onChange }: { value: Rotation; onChange: 
               <th className="py-1 pr-2">Status</th>
               <th className="py-1 pr-2">Safe today</th>
               <th className="py-1 pr-2">Left today</th>
+              <th className="py-1 pr-2">Next email</th>
               <th className="py-1">Why</th>
             </tr>
           </thead>
           <tbody>
             {accounts === null ? (
               <tr>
-                <td className="py-1 text-muted" colSpan={6}>
+                <td className="py-1 text-muted" colSpan={7}>
                   Loading accounts...
                 </td>
               </tr>
@@ -133,7 +144,14 @@ export function EmailRotation({ value, onChange }: { value: Rotation; onChange: 
                     </td>
                     <td className="py-1 pr-2">{h ? h.recommended_today ?? h.limit_today : a.limit_today ?? a.daily_limit}</td>
                     <td className="py-1 pr-2">{a.remaining_today}</td>
-                    <td className="max-w-xs py-1 text-muted">{h?.reason || ""}</td>
+                    <td className="py-1 pr-2">
+                      {h?.protection && !h.protection.eligible
+                        ? h.protection.stage === "health" || h.protection.stage === "provider"
+                          ? "held"
+                          : "tomorrow"
+                        : nextIn(h?.protection?.next_send_at)}
+                    </td>
+                    <td className="max-w-xs py-1 text-muted">{h?.protection && !h.protection.eligible ? h.protection.reason : h?.reason || ""}</td>
                   </tr>
                 );
               })

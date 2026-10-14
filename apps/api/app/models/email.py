@@ -62,6 +62,8 @@ class EmailAccount(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     health_reason: Mapped[str] = mapped_column(Text, default="", nullable=False)
     health_signals: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
     recommended_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)  # today's safe capacity
+    # Rotation delay: no automatic email leaves this inbox before this moment (a random gap after each send)
+    next_send_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     restricted_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)  # backoff
     consecutive_failures: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     health_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

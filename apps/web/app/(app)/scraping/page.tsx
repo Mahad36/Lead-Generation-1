@@ -3,9 +3,17 @@
 import { FileOutreachControls, OutreachModePicker, type FileOutreach, type OutreachMode } from "@/components/file-outreach";
 import { BusinessTypeSelect } from "@/components/business-types";
 import { LocationPicker, searchArea, type Location } from "@/components/location-picker";
-import { DEFAULT_RECIPIENTS, RecipientOptionsBox, recipientsForApi, type RecipientOptions } from "@/components/email-rotation";
+import {
+  DEFAULT_RECIPIENTS,
+  DEFAULT_ROTATION,
+  EmailRotation,
+  RecipientOptionsBox,
+  recipientsForApi,
+  rotationForApi,
+  type RecipientOptions,
+  type Rotation,
+} from "@/components/email-rotation";
 import { CitySuggestions, DEFAULT_SCHEDULE, SchedulePicker, scheduleForApi, slotsProblem, type Schedule } from "@/components/schedule-picker";
-import { SendFrom } from "@/components/send-from";
 import { OutreachTable, type OutreachLead } from "@/components/outreach";
 import { Badge, Button, Card, Input, Label } from "@/components/ui";
 import { api } from "@/lib/api";
@@ -51,6 +59,12 @@ type Job = {
   searches: { country: string; city: string; category: string; status: string; businesses_found: number; new_leads: number; error_message: string }[];
 };
 
+/** A file's inbox choice for the API (campaigns use rotationForApi directly). */
+function fileRotation(r: Rotation) {
+  const { rotation_mode, account_ids, email_account_id } = rotationForApi(r);
+  return { rotation_mode, account_ids, outreach_email_account_id: email_account_id };
+}
+
 export default function ScrapingPage() {
   const [jobName, setJobName] = useState("");
   const [location, setLocationState] = useState<Location>({ country: "United States", area: "" });
@@ -75,7 +89,7 @@ export default function ScrapingPage() {
   const [dailyLimit, setDailyLimit] = useState(50);
   const [outreachMode, setOutreachMode] = useState<OutreachMode>("auto");
   const [outreachLimit, setOutreachLimit] = useState(0); // audits per day; 0 = no limit
-  const [outreachAccount, setOutreachAccount] = useState(""); // "" = automatic (rotation)
+  const [rotation, setRotation] = useState<Rotation>(DEFAULT_ROTATION); // which inboxes send this file's emails
   const [followups, setFollowups] = useState(true);
   const [source, setSource] = useState<{ provider: string; apifyReady: boolean } | null>(null);
 
@@ -153,6 +167,10 @@ export default function ScrapingPage() {
       toast.error("Pick at least one day in the sending schedule");
       return;
     }
+    if (outreachMode !== "off" && rotation.enabled && rotation.mode === "selected" && !rotation.accountIds.length) {
+      toast.error("Tick at least one account for email rotation");
+      return;
+    }
     if (outreachMode !== "off" && slotsProblem(schedule)) {
       toast.error(slotsProblem(schedule));
       return;
@@ -169,7 +187,7 @@ export default function ScrapingPage() {
         // This file's own automatic outreach (audit -> PDF -> personalised email), independent of other files.
         outreach_mode: outreachMode,
         outreach_daily_limit: outreachLimit,
-        outreach_email_account_id: outreachAccount || undefined,
+        ...fileRotation(rotation),
         followups,
         schedule: scheduleForApi(schedule),
         ...recipientsForApi(recipients),
@@ -239,7 +257,7 @@ export default function ScrapingPage() {
     setTypeDraft("");
     setOutreachMode("auto");
     setOutreachLimit(0);
-    setOutreachAccount("");
+    setRotation(DEFAULT_ROTATION);
     setFollowups(true);
     setSchedule(DEFAULT_SCHEDULE);
     setRecipients(DEFAULT_RECIPIENTS);
@@ -353,7 +371,7 @@ export default function ScrapingPage() {
         <OutreachModePicker mode={outreachMode} limit={outreachLimit} onMode={setOutreachMode} onLimit={setOutreachLimit} />
         {outreachMode !== "off" ? (
           <div className="space-y-2">
-            <SendFrom className="max-w-md" value={outreachAccount} onChange={setOutreachAccount} />
+            <EmailRotation value={rotation} onChange={setRotation} />
             <SchedulePicker country={location.country} areas={areas} value={schedule} onChange={setSchedule} windowLabel={windowLabel} />
             <RecipientOptionsBox value={recipients} onChange={setRecipients} />
             <label className="flex items-start gap-2 text-sm">

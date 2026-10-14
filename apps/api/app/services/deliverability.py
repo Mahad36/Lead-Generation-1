@@ -97,22 +97,43 @@ def account_ready(account: EmailAccount | None, now: datetime | None = None) -> 
 def pick_sending_account(
     db: Session, user_id: str, allowed_ids: list[str] | None = None, mode: str = "auto", exclude: set[str] | None = None
 ) -> EmailAccount | None:
-    """Inbox rotation: among the inboxes that are safe to send from (send_protection: health and provider checks),
-    the one with the most safe capacity left today (account_health.rank_accounts).
+    """Inbox rotation, among the inboxes that are safe to send from (send_protection: health and provider checks)
+    and have safe capacity left today:
 
-    allowed_ids limits it to the accounts chosen for a campaign; mode "health" prefers healthier accounts. When every
-    safe inbox is full, one is returned anyway so the caller's capacity check holds the email for later (rotation
-    never moves emails to get round a limit). None when no inbox is safe to send from.
+      1. an inbox that may send right now (its rotation delay is over) before one that is still waiting; among those
+         waiting, the one that is free soonest
+      2. then by mode: "auto" / "selected" the most safe capacity left (bigger inboxes take more), "health" healthier
+         first, "even" take turns (the inbox that sent longest ago)
+      3. then the inbox that sent longest ago, so equal inboxes alternate
+
+    allowed_ids limits it to the accounts chosen for a campaign / file. When every safe inbox is full, one is
+    returned anyway so the caller's capacity check holds the email (rotation never moves emails to get round a
+    limit). None when no inbox is safe to send from.
     """
-    from app.services.account_health import rank_accounts
-    from app.services.send_protection import eligible_accounts
+    from app.services.account_health import STATUS_RANK
+    from app.services.send_protection import eligible_accounts, ready_at
 
     safe = [(a, v) for a, v in eligible_accounts(db, user_id, allowed_ids, exclude) if not v.safety_block]
     if not safe:
         return None
-    room = [(a, (v.as_dict()["remaining_safe"] if v.safe_capacity is not None else 10**6) if v.ok else 0) for a, v in safe]
-    ranked = rank_accounts(room, mode)
-    return ranked[0] if ranked else max((a for a, _ in safe), key=lambda a: a.is_default)
+    now = datetime.now(UTC)
+    with_room = [(a, v, max(ready_at(db, a, now), now)) for a, v in safe if v.ok]
+    if not with_room:
+        return max((a for a, _ in safe), key=lambda a: a.is_default)
+
+    def room(v) -> int:
+        return v.as_dict()["remaining_safe"] if v.safe_capacity is not None else 10**6
+
+    def last_used(a) -> datetime:
+        return a.next_send_at or datetime.min.replace(tzinfo=UTC)
+
+    if mode == "even":
+        key = lambda e: (e[2], last_used(e[0]))  # noqa: E731
+    elif mode == "health":
+        key = lambda e: (e[2], STATUS_RANK.get(e[0].health_status, 1), -room(e[1]), last_used(e[0]))  # noqa: E731
+    else:
+        key = lambda e: (e[2], -room(e[1]), last_used(e[0]))  # noqa: E731
+    return min(with_room, key=key)[0]
 
 
 def reassignment_target(

@@ -383,8 +383,11 @@ def protection_summary(db: Session, account: EmailAccount) -> dict:
         logger.warning("protection_summary_failed", account_id=account.id, error=str(exc)[:200])
         return {"eligible": False, "stage": "health", "reason": "Health couldn't be checked; sending is held."}
     state = (account.health or {}).get("protection") or {}
+    low, high = send_protection.delay_range(db, account.user_id)
     return {
         **verdict.as_dict(),
+        "next_send_at": send_protection.ready_at(db, account).isoformat(),
+        "delay_seconds": [low, high],
         "policy": send_protection.policy_for(db, account.user_id),
         "blocked_since": state.get("since") if state.get("blocked") else None,
         "held": send_protection.held_counts(db, account.user_id),

@@ -20,8 +20,8 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.logging_config import get_logger
 from app.models import Campaign, EmailAccount, EmailMessage, Lead, ScrapingJob, UserSettings, WebsiteAudit
-from app.services.deliverability import in_send_window, sent_recently
-from app.services.send_protection import HealthHold, evaluate, guard
+from app.services.deliverability import in_send_window
+from app.services.send_protection import HealthHold, evaluate, guard, ready_at
 from app.services.gmail import GmailSendError, send_gmail_message
 from app.services.suppression import is_suppressed
 from app.services.gmail_signature import account_signature
@@ -386,8 +386,8 @@ def run_followups(db: Session) -> dict:
         account = db.get(EmailAccount, root.email_account_id)
         # Account health protection first (health, Gmail restrictions, safe capacity, your limit). The follow-up
         # stays on the first email's inbox (same thread), so while that inbox isn't safe it waits.
-        if not evaluate(db, account).ok or sent_recently(db, account):
-            waiting += 1
+        if not evaluate(db, account).ok or ready_at(db, account) > datetime.now(UTC):
+            waiting += 1  # health first, then this inbox's rotation delay
             continue
         try:
             send_followup(db, root, step, steps)

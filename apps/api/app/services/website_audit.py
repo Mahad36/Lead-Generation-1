@@ -938,6 +938,25 @@ def campaign_rotation(campaign) -> dict:
     return rotation(campaign)
 
 
+def audit_file_rotation(db: Session, audit: WebsiteAudit) -> dict:
+    """The scrape file's rotation for this audit's email ({"mode": "auto"} when it has none)."""
+    default = {"mode": "auto", "account_ids": []}
+    if audit.trigger != "auto" or not audit.lead_id:
+        return default
+    try:
+        from app.models import ScrapingJob
+
+        lead = db.get(Lead, audit.lead_id)
+        job = db.get(ScrapingJob, lead.scraping_job_id) if lead and lead.scraping_job_id else None
+        rotation = (job.extra or {}).get("rotation") if job else None
+    except Exception as exc:  # bookkeeping must never block a send
+        logger.warning("rotation_lookup_failed", audit_id=audit.id, error=str(exc))
+        return default
+    if not rotation or rotation.get("mode") in (None, "single"):
+        return default
+    return {"mode": rotation["mode"], "account_ids": list(rotation.get("account_ids") or []) if rotation["mode"] == "selected" else []}
+
+
 def audit_schedule(db: Session, audit: WebsiteAudit) -> dict | None:
     """The sending schedule of the scrape file / campaign this audit belongs to (None: your sending hours)."""
     try:
@@ -1053,7 +1072,7 @@ def send_audit(
     # The chosen inbox, or (none chosen / "" = automatic) the eligible inbox with the most room today,
     # among the accounts its campaign may use (rotation mode / chosen accounts)
     campaign = _audit_campaign(db, audit)
-    rotation = campaign_rotation(campaign) if campaign else {"mode": "auto", "account_ids": []}
+    rotation = campaign_rotation(campaign) if campaign else audit_file_rotation(db, audit)
     account: EmailAccount = deliverability.sending_account(
         db,
         user_id,

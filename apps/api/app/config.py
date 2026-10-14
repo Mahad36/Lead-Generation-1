@@ -94,8 +94,8 @@ class Settings(BaseSettings):
 
     default_daily_send_limit: int = 50
     default_hourly_send_limit: int = 20
-    default_min_send_delay_seconds: int = 60
-    default_max_send_delay_seconds: int = 180
+    default_min_send_delay_seconds: int = 180  # per inbox: 3-7 minutes, random
+    default_max_send_delay_seconds: int = 420
     max_allowed_daily_send_limit: int = 500
     max_allowed_hourly_send_limit: int = 80
     min_allowed_send_delay_seconds: int = 15

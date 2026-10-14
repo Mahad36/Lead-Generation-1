@@ -181,6 +181,37 @@ export default function SettingsPage() {
               </p>
             </div>
           </div>
+          <div className="rounded-lg border border-border p-3">
+            <Label>Delay between emails from the same inbox (minutes, random each time)</Label>
+            <div className="mt-1 flex flex-wrap items-center gap-2 text-sm">
+              <Input
+                type="number"
+                min={2}
+                max={60}
+                step={0.5}
+                className="w-24"
+                value={Math.round((s.default_min_send_delay_seconds / 60) * 2) / 2}
+                onChange={(e) => set("default_min_send_delay_seconds", Math.round(Number(e.target.value) * 60))}
+              />
+              to
+              <Input
+                type="number"
+                min={2}
+                max={60}
+                step={0.5}
+                className="w-24"
+                value={Math.round((s.default_max_send_delay_seconds / 60) * 2) / 2}
+                onChange={(e) => set("default_max_send_delay_seconds", Math.round(Number(e.target.value) * 60))}
+              />
+              minutes
+            </div>
+            <p className="mt-1 text-xs text-muted">
+              After every email, that inbox waits a random time in this range before its next one, so it never sends in
+              a robotic rhythm. Each inbox waits on its own, so with rotation 3 inboxes send about 3 times as fast.
+              Inboxes on the same own domain also stay at least 1 minute apart. 3 to 7 minutes is a good range for cold
+              email; never less than 2 (Gmail rejects emails sent back to back).
+            </p>
+          </div>
           <label className="flex items-center gap-2 text-sm">
             <input type="checkbox" checked={s.skip_previously_contacted} onChange={(e) => set("skip_previously_contacted", e.target.checked)} />
             Skip businesses you already emailed

@@ -73,6 +73,9 @@ class ScrapingJobCreate(BaseModel):
     outreach_daily_limit: int = Field(default=0, ge=0, le=100000)  # audits per day; 0 = no limit
     # The email account this file's outreach sends from (empty: your default account)
     outreach_email_account_id: str | None = None
+    # Or rotate across inboxes, like campaigns: auto | selected | health | even ("single" / None: one account)
+    rotation_mode: Literal["single", "auto", "selected", "health", "even"] | None = None
+    account_ids: list[str] = Field(default_factory=list)
     # Follow-ups (AI & settings -> Sending) after each first email from this file
     followups: bool = True
     # When this file's emails go out (None: your sending hours)

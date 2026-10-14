@@ -18,10 +18,16 @@ Not by replies you write to someone who wrote to you, warm-up between your own i
 
 Atomic: guard() locks the inbox's row until the caller commits its "sending" email record, and emails still being
 sent count against capacity and spacing, so two workers can't both take the last slot.
+
+Rotation delay: each inbox waits a random gap (your "delay between emails", e.g. 3-7 minutes; a campaign's own range
+for its emails) after every email before the next automatic one. The gap is reserved with the send itself
+(next_send_at, under the same lock), so it holds whatever sends next: an audit email, a campaign, a follow-up.
+Inboxes on the same own domain also keep DOMAIN_GAP_SECONDS apart, so a domain never sends in bursts.
 """
 
 from __future__ import annotations
 
+import random
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 
@@ -36,6 +42,7 @@ logger = get_logger("send_protection")
 WAITING_FOR_HEALTH = "Paused — Account Health Protection"
 HEALTH_STALE = timedelta(minutes=20)  # older than this: assessed again before sending
 IN_FLIGHT = timedelta(minutes=30)  # an email "sending" for longer than this is stuck, not in flight
+DOMAIN_GAP_SECONDS = 60  # between any two emails from inboxes on the same own domain
 
 # Which warning signs hold sending. "strict" (default): any credible sign. "balanced": only serious ones (warnings
 # then halve the inbox's capacity instead, as before). Keys are alert kinds, or "kind:severity".
@@ -69,6 +76,7 @@ class Verdict:
     safe_capacity: int | None  # today's conservative capacity (None = no limit)
     sent_today: int
     in_flight: int
+    ready_at: datetime | None = None  # spacing: when this inbox may send next
 
     @property
     def used(self) -> int:
@@ -84,6 +92,7 @@ class Verdict:
         data["remaining_configured"] = max(self.user_limit - self.used, 0) if self.user_limit else None
         data["remaining_safe"] = max(self.safe_capacity - self.used, 0) if self.safe_capacity is not None else None
         data["eligible"] = self.ok
+        data["ready_at"] = self.ready_at.isoformat() if self.ready_at else None
         return data
 
 
@@ -254,26 +263,105 @@ class HealthHold(Exception):
         self.verdict = verdict
 
 
-def guard(db: Session, account: EmailAccount, *, spacing: bool = True) -> Verdict:
+def guard(
+    db: Session, account: EmailAccount, *, spacing: bool = True, delay: tuple[int, int] | None = None
+) -> Verdict:
     """Immediately before sending: re-check everything with the inbox row locked. The lock holds until the caller
     commits the email's "sending" record (which then counts as in flight), so concurrent sends queue up here.
-    On a hold the transaction is rolled back (releasing the lock) and HealthHold is raised."""
-    from app.services.deliverability import MIN_SEND_GAP_SECONDS, seconds_since_last_send
+    On a hold the transaction is rolled back (releasing the lock) and HealthHold is raised.
 
+    spacing: wait for this inbox's rotation delay (automatic emails; a manual send goes straight away). Either way
+    the next delay is reserved here: next_send_at = now + a random gap from `delay` (default: your settings)."""
     refresh_if_stale(db, account)  # may commit: before taking the lock
     lock(db, account)
     verdict = evaluate(db, account, refresh=False)
+    now = datetime.now(UTC)
     if verdict.ok and spacing:
-        since = seconds_since_last_send(db, account)
-        if verdict.in_flight or (since is not None and since < MIN_SEND_GAP_SECONDS):
-            verdict = Verdict(False, "spacing", f"{account.email_address} is sending another email; this one goes next.",
-                              verdict.user_limit, verdict.safe_capacity, verdict.sent_today, verdict.in_flight)
+        ready = ready_at(db, account, now)
+        if ready > now:
+            wait = max(int((ready - now).total_seconds()), 1)
+            verdict = Verdict(
+                False, "spacing",
+                f"{account.email_address} waits between emails; next one in {wait // 60} min {wait % 60} s.",
+                verdict.user_limit, verdict.safe_capacity, verdict.sent_today, verdict.in_flight, ready,
+            )
     if not verdict.ok:
         db.rollback()  # release the lock before anything else touches this inbox's row
         if verdict.safety_block:
             record_state(account, verdict)
         raise HealthHold(verdict)
+    low, high = delay or delay_range(db, account.user_id)
+    account.next_send_at = now + timedelta(seconds=random.uniform(*_floor((low, high))))  # committed with the email
     return verdict
+
+
+def _floor(delay: tuple[int, int]) -> tuple[int, int]:
+    """Never under Gmail's minimum gap (back-to-back sends get "421 server busy")."""
+    from app.services.deliverability import MIN_SEND_GAP_SECONDS
+
+    low = max(int(delay[0] or 0), MIN_SEND_GAP_SECONDS)
+    return low, max(int(delay[1] or 0), low)
+
+
+def delay_range(db: Session, user_id: str) -> tuple[int, int]:
+    """Your delay between two emails from the same inbox (AI & settings -> Sending), in seconds."""
+    from app.config import get_settings
+
+    app = get_settings()
+    row = (
+        db.query(UserSettings.default_min_send_delay_seconds, UserSettings.default_max_send_delay_seconds)
+        .filter(UserSettings.user_id == user_id)
+        .first()
+    )
+    low, high = row if row else (app.default_min_send_delay_seconds, app.default_max_send_delay_seconds)
+    return _floor((low or app.default_min_send_delay_seconds, high or app.default_max_send_delay_seconds))
+
+
+def ready_at(db: Session, account: EmailAccount, now: datetime | None = None) -> datetime:
+    """When this inbox may send its next automatic email: after its rotation delay, Gmail's minimum gap since its
+    last email, a little while when an email is still being sent, and the gap since the last email from any inbox
+    on the same own domain."""
+    from app.services.deliverability import MIN_SEND_GAP_SECONDS
+    from app.services.health_alerts import FREE_MAIL
+
+    now = now or datetime.now(UTC)
+    moments = [now]
+    if account.next_send_at:
+        moments.append(account.next_send_at)
+    last = db.query(func.max(EmailMessage.sent_at)).filter(EmailMessage.email_account_id == account.id).scalar()
+    if last:
+        moments.append(last + timedelta(seconds=MIN_SEND_GAP_SECONDS))
+    if in_flight_count(db, account, now):
+        moments.append(now + timedelta(seconds=MIN_SEND_GAP_SECONDS))
+    domain = _domain(account)
+    if domain not in FREE_MAIL:
+        siblings = [
+            a for (a,) in db.query(EmailAccount.id).filter(
+                EmailAccount.user_id == account.user_id,
+                EmailAccount.id != account.id,
+                EmailAccount.email_address.ilike(f"%@{domain}"),
+            )
+        ]
+        if siblings:
+            recent = (
+                db.query(func.max(func.coalesce(EmailMessage.sent_at, EmailMessage.created_at)))
+                .filter(
+                    EmailMessage.email_account_id.in_(siblings),
+                    EmailMessage.status.in_(["sending", "sent"]),
+                    EmailMessage.created_at >= now - timedelta(hours=1),
+                )
+                .scalar()
+            )
+            if recent:
+                moments.append(recent + timedelta(seconds=DOMAIN_GAP_SECONDS))
+    return max(moments)
+
+
+def soonest_ready(db: Session, user_id: str, allowed_ids: list[str] | None = None) -> datetime | None:
+    """The earliest moment one of these inboxes (safe, with capacity left) may send; None if none can today."""
+    now = datetime.now(UTC)
+    times = [ready_at(db, a, now) for a, v in eligible_accounts(db, user_id, allowed_ids) if v.ok]
+    return min(times) if times else None
 
 
 def lock(db: Session, account: EmailAccount) -> None:

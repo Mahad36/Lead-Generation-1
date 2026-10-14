@@ -416,3 +416,136 @@ def test_rotating_campaign_skips_the_unhealthy_inbox(db, no_network):
     campaign, cl = campaign_with_lead(db, user, risky, rotate=True)
     assert send_claimed_lead(db, cl) == "sent"
     assert no_network == [good.email_address]
+
+
+# ---------------------------------------------------------------- rotation and delays
+
+
+def test_each_send_reserves_a_random_delay_for_that_inbox(db):
+    user = make_user(db)
+    account = make_account(db, user, "a@gmail.com")
+    before = datetime.now(UTC)
+    send_protection.guard(db, account)  # passes, and reserves this inbox's next gap
+    db.commit()
+    gap = (account.next_send_at - before).total_seconds()
+    assert 180 <= gap <= 421  # default 3-7 minutes
+    with pytest.raises(send_protection.HealthHold) as held:
+        send_protection.guard(db, account)  # the next automatic email waits for it
+    assert held.value.verdict.stage == "spacing" and held.value.verdict.ready_at >= account.next_send_at
+    send_protection.guard(db, account, spacing=False)  # a manual send goes straight away (and reserves again)
+
+
+def test_delay_never_below_gmails_minimum_gap(db):
+    user = make_user(db)
+    account = make_account(db, user, "a@gmail.com")
+    send_protection.guard(db, account, delay=(5, 10))
+    db.commit()
+    assert (account.next_send_at - datetime.now(UTC)).total_seconds() >= 115
+
+
+def test_rotation_prefers_an_inbox_that_is_ready_now(db):
+    from app.services.deliverability import pick_sending_account
+
+    user = make_user(db)
+    busy = make_account(db, user, "busy@gmail.com", limit=100, next_send_at=datetime.now(UTC) + timedelta(minutes=4))
+    ready = make_account(db, user, "ready@gmail.com", limit=20)
+    assert pick_sending_account(db, user.id).id == ready.id  # even though busy has more room
+    ready.next_send_at = datetime.now(UTC) + timedelta(minutes=6)
+    db.commit()
+    assert pick_sending_account(db, user.id).id == busy.id  # nobody ready: the one free soonest
+
+
+def test_take_turns_mode_alternates(db):
+    from app.services.deliverability import pick_sending_account
+
+    user = make_user(db)
+    a = make_account(db, user, "a@gmail.com", limit=100)
+    b = make_account(db, user, "b@gmail.com", limit=10)
+    order = []
+    for _ in range(4):
+        picked = pick_sending_account(db, user.id, mode="even")
+        order.append(picked.email_address)
+        send_protection.guard(db, picked, spacing=False)  # reserves its delay
+        db.commit()
+        for x in (a, b):  # fast-forward: both delays over, the order of use remembered
+            if x.next_send_at:
+                x.next_send_at = datetime.now(UTC) - timedelta(seconds=1 if x.id == picked.id else 60)
+        db.commit()
+    assert order == ["a@gmail.com", "b@gmail.com", "a@gmail.com", "b@gmail.com"] or order == [
+        "b@gmail.com", "a@gmail.com", "b@gmail.com", "a@gmail.com"]
+
+
+def test_inboxes_on_the_same_own_domain_keep_apart(db):
+    from app.models import EmailMessage
+
+    user = make_user(db)
+    first = make_account(db, user, "mahad@beecreative.pk")
+    second = make_account(db, user, "hello@beecreative.pk")
+    other = make_account(db, user, "me@gmail.com")
+    db.add(EmailMessage(user_id=user.id, email_account_id=first.id, recipient_email="x@x.com", subject="s",
+                        status="sent", sent_at=datetime.now(UTC) - timedelta(seconds=10)))
+    db.commit()
+    with pytest.raises(send_protection.HealthHold) as held:
+        send_protection.guard(db, second)
+    assert held.value.verdict.stage == "spacing"
+    send_protection.guard(db, other)  # a different domain isn't held
+
+
+def test_rotating_campaign_is_paced_by_its_inboxes_not_one_delay(db, no_network):
+    from app.models import Campaign
+    from app.services.campaigns import send_claimed_lead
+
+    user = make_user(db)
+    first = make_account(db, user, "a@gmail.com", is_default=True)
+    make_account(db, user, "b@gmail.com")
+    make_account(db, user, "c@gmail.com")
+    campaign, cl = campaign_with_lead(db, user, first, rotate=True)
+    assert send_claimed_lead(db, cl) == "sent"
+    campaign = db.get(Campaign, campaign.id)
+    db.refresh(campaign)
+    wait = (campaign.next_eligible_at - datetime.now(UTC)).total_seconds()
+    assert wait < 60  # another inbox is ready: not 3-7 minutes for the whole campaign
+
+
+def test_single_inbox_campaign_waits_for_that_inbox(db, no_network):
+    from app.models import Campaign
+    from app.services.campaigns import send_claimed_lead
+
+    user = make_user(db)
+    only = make_account(db, user, "a@gmail.com")
+    campaign, cl = campaign_with_lead(db, user, only)
+    assert send_claimed_lead(db, cl) == "sent"
+    campaign = db.get(Campaign, campaign.id)
+    db.refresh(campaign)
+    wait = (campaign.next_eligible_at - datetime.now(UTC)).total_seconds()
+    assert 55 <= wait <= 200  # the campaign's own 60-180 s range, floored at Gmail's 2 minutes
+
+
+def test_scrape_file_rotation(db):
+    from app.models import Lead, ScrapingJob, WebsiteAudit
+    from app.services.website_audit import audit_file_rotation
+
+    user = make_user(db)
+    a = make_account(db, user, "a@gmail.com")
+    job = ScrapingJob(user_id=user.id, name="f", status="completed",
+                      extra={"rotation": {"mode": "selected", "account_ids": [a.id]}})
+    db.add(job)
+    db.flush()
+    lead = Lead(user_id=user.id, business_name="B", scraping_job_id=job.id)
+    db.add(lead)
+    db.flush()
+    audit = WebsiteAudit(user_id=user.id, lead_id=lead.id, trigger="auto", website_url="https://b.com")
+    assert audit_file_rotation(db, audit) == {"mode": "selected", "account_ids": [a.id]}
+    job.extra = {"rotation": {"mode": "even", "account_ids": []}}
+    assert audit_file_rotation(db, audit)["mode"] == "even"
+    job.extra = {}
+    assert audit_file_rotation(db, audit) == {"mode": "auto", "account_ids": []}
+    db.rollback()
+
+
+def test_delay_validation():
+    from app.services.limits import validate_send_limits
+
+    assert validate_send_limits(30, 30, 180, 420)[2:] == (180, 420)
+    assert validate_send_limits(30, 30, 5000, 9000)[2:] == (3600, 3600)
+    assert validate_send_limits(30, 30, 400, 100)[2:] == (400, 400)

@@ -475,7 +475,8 @@ def hold_campaign_lead(db: Session, campaign_id: str, campaign_lead_id: str, ver
     campaign_lead.locked_by = ""
     now = datetime.now(UTC)
     if verdict.stage == "spacing":
-        campaign.next_eligible_at = now + timedelta(seconds=MIN_SEND_GAP_SECONDS)
+        account = db.get(EmailAccount, campaign.email_account_id) if campaign.email_account_id else None
+        campaign.next_eligible_at = campaign_next_send(db, campaign, account, now, fallback=verdict.ready_at)
         result = "spacing"
     elif verdict.safety_block:
         account = db.get(EmailAccount, campaign.email_account_id) if campaign.email_account_id else None
@@ -498,6 +499,19 @@ def hold_campaign_lead(db: Session, campaign_id: str, campaign_lead_id: str, ver
         result = "daily_limit"
     db.commit()
     return result
+
+
+def campaign_next_send(db: Session, campaign: Campaign, account, now: datetime, fallback: datetime | None = None) -> datetime:
+    """When this campaign can send its next email: the soonest one of its inboxes is free again."""
+    from app.services.send_protection import ready_at, soonest_ready
+
+    if campaign_rotates(campaign):
+        rotation = campaign_rotation(campaign)
+        moment = soonest_ready(db, campaign.user_id, rotation["account_ids"] or None)
+    else:
+        moment = ready_at(db, account, now) if account else None
+    moment = moment or fallback or now + timedelta(seconds=MIN_SEND_GAP_SECONDS)
+    return max(moment, now + timedelta(seconds=5)) + timedelta(seconds=random.randint(0, 20))
 
 
 def resume_health_held_campaigns(db: Session) -> int:
@@ -875,7 +889,8 @@ def send_claimed_lead(db: Session, campaign_lead: CampaignLead) -> str:
     from app.services.send_protection import HealthHold, guard
 
     try:
-        guard(db, account)
+        # This campaign's delay range is the gap this inbox waits after the email (each inbox has its own)
+        guard(db, account, delay=(campaign.min_delay_seconds, campaign.max_delay_seconds))
     except HealthHold as hold:
         return hold_campaign_lead(db, campaign.id, campaign_lead.id, hold.verdict)
 
@@ -920,8 +935,9 @@ def send_claimed_lead(db: Session, campaign_lead: CampaignLead) -> str:
         campaign.sent_today += 1
         campaign.sent_this_hour += 1
         campaign.last_sent_at = now
-        delay = random.randint(campaign.min_delay_seconds, campaign.max_delay_seconds)
-        campaign.next_eligible_at = now + timedelta(seconds=delay)
+        # Paced by its inboxes: next when one of them is free again (rotating over 3 inboxes really is 3x faster,
+        # each inbox still waiting its own random delay)
+        campaign.next_eligible_at = campaign_next_send(db, campaign, account, now)
         lead.last_contacted_at = now
         lead.email_status = "contacted"
         remaining = (
@@ -1212,10 +1228,10 @@ def campaign_adds_signature(db: Session, audit) -> bool:
 
 
 def campaign_rotation(campaign: Campaign) -> dict:
-    """{"mode": single | auto | selected | health, "account_ids": [...]}.
+    """{"mode": single | auto | selected | health | even, "account_ids": [...]}.
 
     single: the campaign's own account; auto: every eligible connected account by remaining capacity;
-    selected: only the chosen accounts; health: every eligible account, healthier ones first.
+    selected: only the chosen accounts; health: every eligible account, healthier ones first; even: take turns.
     """
     extra = campaign.extra or {}
     rotation = extra.get("rotation") or {}

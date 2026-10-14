@@ -35,6 +35,21 @@ def _refresh_job(db: Session, job: ScrapingJob) -> bool:
         return False
 
 
+def file_rotation(db, user_id: str, data) -> dict:
+    """{"mode": single | auto | selected | health | even, "account_ids": [...]} for a new file's outreach."""
+    from app.models import EmailAccount
+
+    mode = data.rotation_mode or ("single" if data.outreach_email_account_id else "auto")
+    ids = []
+    if mode == "selected":
+        own = {a for (a,) in db.query(EmailAccount.id).filter(EmailAccount.user_id == user_id)}
+        ids = [a for a in data.account_ids if a in own]
+        if not ids:
+            from fastapi import HTTPException
+
+            raise HTTPException(status_code=400, detail="Choose at least one of your connected accounts for rotation.")
+    return {"mode": mode, "account_ids": ids}
+
 def create_job(db: Session, user_id: str, data: ScrapingJobCreate) -> ScrapingJob:
     settings = db.query(UserSettings).filter(UserSettings.user_id == user_id).first()
     max_results = data.max_results_per_search or (settings.scrape_max_results if settings else get_settings().scrape_max_results)
@@ -42,6 +57,9 @@ def create_job(db: Session, user_id: str, data: ScrapingJobCreate) -> ScrapingJo
     if not name or name in {"Scraping job", "Maps scrape"}:
         name = " + ".join(f"{item.city} {item.category}".strip() for item in data.searches)[:255] or "Maps scrape"
     from app.services.auto_audits import own_email_account_id
+
+    if data.rotation_mode and data.rotation_mode != "single":
+        data.outreach_email_account_id = None  # rotation picks the inbox for each email
 
     job = ScrapingJob(
         user_id=user_id,
@@ -55,6 +73,7 @@ def create_job(db: Session, user_id: str, data: ScrapingJobCreate) -> ScrapingJo
             "followups": data.followups,
             "schedule": data.schedule.as_dict() if data.schedule else None,
             "recipients": {"include_generic": data.include_generic, "cc_enabled": data.cc_enabled, "cc_max": data.cc_max},
+            "rotation": file_rotation(db, user_id, data),
         },
         outreach_status="off" if data.outreach_mode == "off" else "running",
         outreach_auto_send=data.outreach_mode != "review",

@@ -79,8 +79,9 @@ class UserSettings(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
     default_daily_send_limit: Mapped[int] = mapped_column(Integer, default=50, nullable=False)
     default_hourly_send_limit: Mapped[int] = mapped_column(Integer, default=20, nullable=False)
-    default_min_send_delay_seconds: Mapped[int] = mapped_column(Integer, default=60, nullable=False)
-    default_max_send_delay_seconds: Mapped[int] = mapped_column(Integer, default=180, nullable=False)
+    # Random delay between two emails from the same inbox (each inbox has its own)
+    default_min_send_delay_seconds: Mapped[int] = mapped_column(Integer, default=180, nullable=False)
+    default_max_send_delay_seconds: Mapped[int] = mapped_column(Integer, default=420, nullable=False)
 
     require_approval_before_sending: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     skip_previously_contacted: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)

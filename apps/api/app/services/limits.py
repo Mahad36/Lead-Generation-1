@@ -13,7 +13,6 @@ def validate_send_limits(
     hourly = daily if hourly < 1 else min(hourly, daily)
     # Floor delay so Gmail/SMTP are not hammered; the user still chooses emails/day.
     min_delay = max(int(min_delay or 15), 5)
-    max_delay = max(int(max_delay or min_delay), min_delay)
-    if max_delay > 3600:
-        max_delay = 3600
+    min_delay = min(min_delay, 3600)
+    max_delay = min(max(int(max_delay or min_delay), min_delay), 3600)
     return daily, hourly, min_delay, max_delay
