@@ -27,6 +27,7 @@ class SettingsOut(BaseModel):
     free_offers: str = ""
     track_opens: bool = True
     health_policy: str = "strict"
+    automation_offers: str = ""
     portfolio_sheet_url: str = ""
     contact_email: str
     contact_phone: str
@@ -83,6 +84,7 @@ class SettingsUpdate(BaseModel):
     free_offers: str | None = None
     track_opens: bool | None = None
     health_policy: Literal["strict", "balanced"] | None = None
+    automation_offers: str | None = None  # comma-separated automation keys you offer ("" = none)
     portfolio_sheet_url: str | None = None
     contact_email: str | None = None
     contact_phone: str | None = None

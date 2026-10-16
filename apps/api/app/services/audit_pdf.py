@@ -565,6 +565,37 @@ def _platform_block(item: dict, platform_name: str, styles) -> KeepTogether:
     return KeepTogether([block, Spacer(1, 10)])
 
 
+def _automation_block(item: dict, styles) -> KeepTogether:
+    question = item.get("basis") == "question"
+    tag = Tag("Worth asking" if question else "Opportunity", colors.HexColor("#2563EB") if question else colors.HexColor("#059669"))
+    body = [
+        Paragraph(_safe(item.get("title")), styles["finding_title"]),
+        Spacer(1, 4),
+        Table([[tag]], hAlign="LEFT", style=TableStyle([("LEFTPADDING", (0, 0), (-1, -1), 0),
+              ("TOPPADDING", (0, 0), (-1, -1), 0), ("BOTTOMPADDING", (0, 0), (-1, -1), 0)])),
+        Spacer(1, 6),
+    ]
+    if item.get("evidence"):
+        label = "Worth asking" if question else "What I saw"
+        body += [Paragraph(f"<b>{label}:</b> {_safe(item.get('evidence'))}", styles["body"]), Spacer(1, 3)]
+    body.append(Paragraph(f"<b>What would run automatically:</b> {_safe(item.get('recommendation'))}", styles["body"]))
+    if item.get("business_relevance"):
+        body += [Spacer(1, 3), Paragraph(f"<b>Why it matters:</b> {_safe(item.get('business_relevance'))}", styles["body"])]
+    block = Table([["", body]], colWidths=[4, CONTENT_W - 4])
+    block.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (0, 0), YELLOW),
+        ("BACKGROUND", (1, 0), (1, 0), PANEL),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (0, 0), 0),
+        ("RIGHTPADDING", (0, 0), (0, 0), 0),
+        ("LEFTPADDING", (1, 0), (1, 0), 12),
+        ("RIGHTPADDING", (1, 0), (1, 0), 12),
+        ("TOPPADDING", (0, 0), (-1, -1), 10),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 11),
+    ]))
+    return KeepTogether([block, Spacer(1, 10)])
+
+
 def build_audit_pdf(
     *,
     report: dict,
@@ -774,6 +805,16 @@ def build_audit_pdf(
         story += [CondPageBreak(90 * mm), PillHeading("Your Website Platform"),
                   Paragraph(_safe(platform_intro({**platform, "name": platform_name})), styles["body"]), Spacer(1, 10)]
         story += [_platform_block(item, platform_name, styles) for item in opportunities[:5]]
+
+    # ---- What could run automatically: automations fitted to this business and what its site shows
+    automations = [a for a in report.get("automation_opportunities") or [] if a.get("title") and a.get("recommendation")]
+    if automations:
+        story += [CondPageBreak(90 * mm), PillHeading("What Could Run Automatically"),
+                  Paragraph(_safe(
+                      "A few things your website and front desk could handle on their own, so enquiries and bookings "
+                      "don't wait for someone to be free. Each one is based on what we saw on your site."
+                  ), styles["body"]), Spacer(1, 10)]
+        story += [_automation_block(item, styles) for item in automations[:3]]
 
     # ---- What works + action plan
     strengths = report.get("strengths") or []

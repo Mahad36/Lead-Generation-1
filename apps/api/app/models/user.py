@@ -44,6 +44,13 @@ class UserSettings(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     # Account health protection (services/send_protection.py): "strict" holds sending on any credible warning
     # sign; "balanced" only on serious ones (warnings halve capacity instead)
     health_policy: Mapped[str] = mapped_column(String(16), default="strict", server_default="strict", nullable=False)
+    # Automations you offer (services/automations.py keys, comma-separated): audits and emails only propose these
+    automation_offers: Mapped[str] = mapped_column(
+        Text,
+        default="online_booking,instant_reply,ai_assistant,review_requests,quote_followup,missed_call_textback",
+        server_default="online_booking,instant_reply,ai_assistant,review_requests,quote_followup,missed_call_textback",
+        nullable=False,
+    )
     # Google Sheet of sites you built ("Anyone with the link"): one is referenced in every email by niche
     portfolio_sheet_url: Mapped[str] = mapped_column(Text, default="", nullable=False)
     contact_email: Mapped[str] = mapped_column(String(320), default="", nullable=False)

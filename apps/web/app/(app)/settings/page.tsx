@@ -16,6 +16,16 @@ type AiProvider = {
   docs_url?: string;
 };
 
+/** apps/api/app/services/automations.py::AUTOMATIONS */
+const AUTOMATION_OPTIONS: [string, string, string][] = [
+  ["online_booking", "Online booking with automatic reminders", "Book any hour; confirmations and reminders go out by themselves."],
+  ["instant_reply", "Instant reply to every enquiry", "Every form or quote request gets a reply within a minute."],
+  ["ai_assistant", "AI assistant on the website", "Answers questions and takes bookings 24/7."],
+  ["review_requests", "Automatic review requests", "A Google review request after each visit or job."],
+  ["quote_followup", "Automatic quote follow-ups", "Friendly follow-ups on quotes that haven't been accepted."],
+  ["missed_call_textback", "Missed-call text-back", "A missed call gets an instant text with a booking link."],
+];
+
 export default function SettingsPage() {
   const [tab, setTab] = useState("workspace");
   const [s, setS] = useState<any>(null);
@@ -127,6 +137,37 @@ export default function SettingsPage() {
               Each email offers one of these, the one that fits that website&apos;s biggest problem. Leave empty to use the
               three examples shown.
             </p>
+          </div>
+          <div className="rounded-lg border border-border p-3">
+            <Label>Automations you offer</Label>
+            <p className="mb-2 text-xs text-muted">
+              Each audit picks the one that fits the business best, from what its website shows (e.g. booking by phone
+              only, a contact form nobody answers straight away) and its type of business. The email proposes it in one
+              short paragraph and the subject line is built around it; the PDF gets a &ldquo;What Could Run
+              Automatically&rdquo; page. Only the ones ticked here are ever offered.
+            </p>
+            <div className="grid gap-2 sm:grid-cols-2">
+              {AUTOMATION_OPTIONS.map(([key, title, hint]) => {
+                const chosen = String(s.automation_offers ?? "").split(",").filter(Boolean);
+                const on = chosen.includes(key);
+                return (
+                  <label key={key} className="flex items-start gap-2 text-sm">
+                    <input
+                      type="checkbox"
+                      className="mt-1"
+                      checked={on}
+                      onChange={() =>
+                        set("automation_offers", (on ? chosen.filter((k) => k !== key) : [...chosen, key]).join(","))
+                      }
+                    />
+                    <span>
+                      {title}
+                      <span className="block text-xs text-muted">{hint}</span>
+                    </span>
+                  </label>
+                );
+              })}
+            </div>
           </div>
           <div><Label>Target industries</Label><Input value={s.target_industries || ""} onChange={(e) => set("target_industries", e.target.value)} /></div>
           <div className="space-y-2">

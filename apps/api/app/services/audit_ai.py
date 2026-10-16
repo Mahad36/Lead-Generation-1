@@ -91,6 +91,21 @@ AUDIT_SCHEMA: dict = {
             },
         },
         "outreach_angle": {"type": "string"},
+        "automation_opportunities": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "key": {"type": "string"},
+                    "title": {"type": "string"},
+                    "evidence": {"type": "string"},
+                    "recommendation": {"type": "string"},
+                    "business_relevance": {"type": "string"},
+                },
+                "required": ["key", "title", "evidence", "recommendation", "business_relevance"],
+                "additionalProperties": False,
+            },
+        },
         "free_offer": {
             "type": "object",
             "properties": {"offer": {"type": "string"}, "why": {"type": "string"}},
@@ -119,6 +134,7 @@ AUDIT_SCHEMA: dict = {
         "conclusion",
         "platform_opportunities",
         "outreach_angle",
+        "automation_opportunities",
         "free_offer",
         "reference_sites",
     ],
@@ -212,6 +228,15 @@ checks, each with a status and evidence (page URL + what was observed). Use them
   technologies) and phrase each as a concrete change to ask their developer or agency for, with no claims about a
   CMS they don't use. Unknown platform: base them on what was observed only. Empty list only if nothing is
   supported by evidence.
+- automation_opportunities: 1-3 automations from website_crawl.automation_candidates ONLY (copy its key; never add
+  one that isn't listed: those are the only ones the sender offers). Order by fit for this business. Each:
+  title in plain words for this business (e.g. "Let patients book online, with reminders"), evidence = the
+  candidate's evidence in your own words, tied to what you saw (a page or area; "I couldn't find..." wording, since
+  widgets loaded by scripts can be invisible, never "you don't have"), recommendation = what would run
+  automatically for them and how it fits their site and platform, business_relevance = the likely benefit in
+  cautious words (no promised numbers). A candidate with basis "question" had nothing seen on the site: write its
+  evidence as a question to the owner (e.g. "Do you follow up on quotes automatically, or by hand?").
+  Empty list only if no candidates are given.
 - outreach_angle: 2-3 sentences for a cold email, from the strongest confirmed_missing or improvement item:
   a specific observation (naming the page or area), the platform-specific opportunity (naming the platform and its
   native feature when the platform is known), a possible benefit in
@@ -224,6 +249,16 @@ Rules:
 - When audit.outreach_angle is given, build the opening on it (it is the strongest verified observation,
   possibly edited by the sender). Never present something the audit only "couldn't detect" as a fact, and never
   promise results.
+- Automation: when audit.automation is given, add ONE short paragraph after the main website finding that
+  proposes it, tied to that business and what was seen ("You take bookings by phone only. Online booking with
+  automatic reminders would let new patients book at 10 pm..."). One automation only, never a list or a menu of
+  services. Plain words: name what would happen automatically, not the technology; never "AI-powered solutions".
+  If its basis is "question", ask it as a question instead of stating a gap. Present the website work and the
+  automation as one fix, not two pitches. No promised numbers.
+- Subject line: 3-7 words, specific to this business, built around the automation gap when there is one (else the
+  main finding); like a person's note, lower-case is fine. Examples: "Booking at Sharp Dentistry after 5pm",
+  "What happens after someone requests a quote?", "your Book Now button, on mobile", "turning sales into Google
+  reviews". Never use "AI", "automation", "boost", "free", "guaranteed", exclamation marks or ALL CAPS in it.
 - Platform: when audit.platform is a named platform (anything except "", "Unknown" and "Custom-built"), include
   exactly one natural sentence with a platform-specific point taken from audit.platform_opportunities (or the
   outreach angle), naming the platform and the native way to fix it, e.g. "Since the site runs on WordPress with
@@ -246,10 +281,9 @@ Rules:
   sender's signature with name and company is added underneath automatically); otherwise sign off with the
   sender's name and company.
 - No invented facts, no flattery, no fake urgency, no claims about results or rankings.
-- 90-160 words. body_html: simple <p> paragraphs only (no <html>, <head>, styles or images; the reference site is
+- 100-170 words. body_html: simple <p> paragraphs only (no <html>, <head>, styles or images; the reference site is
   the only link), no unsubscribe line, no P.S.
-- subject: under 50 characters, lower-key and specific to the business (like a note from a person), no clickbait,
-  no ALL CAPS, no exclamation marks.
+- subject: under 50 characters, following the subject line rule above.
 """ + HUMAN_STYLE
 
 
@@ -369,6 +403,17 @@ def normalize_report(data: dict) -> dict:
         "conclusion": _text(data.get("conclusion"), 1500),
         "platform_opportunities": opportunities[:6],
         "outreach_angle": _text(data.get("outreach_angle"), 800),
+        "automation_opportunities": [
+            {
+                "key": _text(item.get("key"), 40),
+                "title": _text(item.get("title"), 200),
+                "evidence": _text(item.get("evidence"), 500),
+                "recommendation": _text(item.get("recommendation"), 700),
+                "business_relevance": _text(item.get("business_relevance"), 400),
+            }
+            for item in data.get("automation_opportunities") or []
+            if isinstance(item, dict) and _text(item.get("key")) and _text(item.get("title"))
+        ][:3],
         "free_offer": {
             "offer": _text((data.get("free_offer") or {}).get("offer"), 400),
             "why": _text((data.get("free_offer") or {}).get("why"), 600),
@@ -447,6 +492,8 @@ def generate_audit_email(
             o for o in report.get("platform_opportunities") or [] if o.get("status") in ("confirmed_missing", "improvement")
         ][:2],
         "reference_site": (report.get("reference_sites") or [None])[0],
+        # The one automation to propose (the best fit, grounded in the site), with its basis: seen / question
+        "automation": (report.get("automation_opportunities") or [None])[0],
     }
     prompt = (
         "Write the outreach email that accompanies the attached audit PDF.\n"

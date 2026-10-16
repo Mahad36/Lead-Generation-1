@@ -46,6 +46,8 @@ from app.services.performance import PerformanceBlockedError, PerformanceError, 
 from app.services.portfolio import for_prompt as portfolio_for_prompt
 from app.services.portfolio import keep_known
 from app.services.screenshots import ScreenshotError, capture_screenshots
+from app.services.automations import candidates as automation_candidates
+from app.services.automations import merge_signals, parse_offers, website_signals
 from app.services.platform_detection import detect_platform
 from app.services.suppression import is_suppressed
 from app.utils.normalize import normalize_email, normalize_url
@@ -467,6 +469,8 @@ def _collect_site_data(lead: Lead, url: str) -> dict:
         "platform": detection.platform_name,
         "platform_confidence": detection.confidence,
         "technologies": [t["name"] for t in detection.technologies][:15],
+        # What the pages show that decides which automation to propose (services/automations.py)
+        "automation_signals": website_signals([p.html for p in crawl.pages if p.html], detection.secondary),
         "social_links": crawl.social,
         "emails_found": [e["email"] for e in crawl.emails][:5],
         "business_summary": analysis.get("business_summary", ""),
@@ -482,6 +486,23 @@ def _collect_site_data(lead: Lead, url: str) -> dict:
     }
 
 
+def _automation_offers(db: Session, user_id: str) -> str | None:
+    row = db.query(UserSettings.automation_offers).filter(UserSettings.user_id == user_id).first()
+    return row[0] if row else None
+
+
+def keep_offered_automations(items: list[dict], options: list[dict]) -> list[dict]:
+    """Only automations that were offered to the analysis (so only ones you sell); "question" ones stay questions."""
+    allowed = {o["key"]: o for o in options}
+    kept = []
+    for item in items:
+        option = allowed.get(item.get("key"))
+        if not option or any(k["key"] == option["key"] for k in kept):
+            continue
+        kept.append({**item, "name": option["name"], "basis": option["basis"]})
+    return kept[:3]
+
+
 def _redetect_platform(site: dict, url: str, page: dict, log) -> dict:
     """The plain fetch couldn't tell the platform (e.g. a firewall served a challenge page): detect it again from the
     page the real browser rendered, and keep that when it is more certain."""
@@ -492,6 +513,9 @@ def _redetect_platform(site: dict, url: str, page: dict, log) -> dict:
         return site
     log.info("platform_redetected_from_browser", platform=detection.platform_name, confidence=detection.confidence)
     return site | {
+        "automation_signals": merge_signals(
+            site.get("automation_signals"), website_signals([page.get("html") or ""], detection.secondary)
+        ),
         "platform": detection.platform_name,
         "platform_confidence": detection.confidence,
         "technologies": [t["name"] for t in detection.technologies][:15],
@@ -689,6 +713,10 @@ def run_audit(db: Session, audit_id: str) -> str:
         browser_page = screenshots.pop("_page", None)
         if browser_page:
             site = _redetect_platform(site, audit.website_url, browser_page, log)
+            # anything the real browser saw (booking, chat, review widgets loaded by scripts) counts too
+            site["automation_signals"] = merge_signals(
+                site.get("automation_signals"), website_signals([browser_page.get("html") or ""])
+            )
         audit.site_data = site | {"screenshots": {k: len(v) for k, v in screenshots.items()}}
         db.commit()
         images = screenshots.get("desktop", []) + screenshots.get("mobile", [])
@@ -699,10 +727,15 @@ def run_audit(db: Session, audit_id: str) -> str:
         provider = get_ai_provider_for_user(db, audit.user_id)
         audit.ai_provider, audit.ai_model = config.provider, config.model
         portfolio_sites = portfolio_for_prompt(db, audit.user_id)
+        # Automations worth proposing: from what the site shows and the business type, only ones you offer
+        automation_options = automation_candidates(
+            site.get("automation_signals"), lead.category or "", parse_offers(_automation_offers(db, audit.user_id))
+        )
         report = generate_audit_report(
             provider,
             lead=lead_info,
-            site={k: v for k, v in site.items() if k != "text_excerpt"} | {"text_excerpt": site["text_excerpt"][:1500]},
+            site={k: v for k, v in site.items() if k != "text_excerpt"}
+            | {"text_excerpt": site["text_excerpt"][:1500], "automation_candidates": automation_options},
             performance=performance,
             timeout=settings.audit_ai_timeout_seconds,
             images=images,
@@ -710,6 +743,9 @@ def run_audit(db: Session, audit_id: str) -> str:
             portfolio=portfolio_sites,
         )
         report["reference_sites"] = keep_known(report.get("reference_sites") or [], portfolio_sites)
+        report["automation_opportunities"] = keep_offered_automations(
+            report.get("automation_opportunities") or [], automation_options
+        )
         apply_platform_results(audit, lead, report)
         audit.report = report
         audit.overall_score = report.get("overall_score")
