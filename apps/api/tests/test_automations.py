@@ -79,3 +79,10 @@ def test_pdf_has_the_automation_page():
     pdf = build_audit_pdf(report=report, performance={"url": "https://x.com"}, lead={"business_name": "X Dental"},
                           sender={"company_name": "Bee Creative"}, generated_at=datetime.now(UTC))
     assert pdf.startswith(b"%PDF")
+
+
+def test_ordinary_words_are_not_mistaken_for_tools():
+    text = "<p>We respond in a timely manner, top of the podium, broadly speaking, on Ocean Boulevard. We weave quality in.</p>"
+    s = website_signals([text])
+    assert not s["booking_tool"] and not s["chat_widget"] and not s["review_widget"]
+    assert website_signals(['<script src="https://app.gettimely.com/book.js"></script>'])["booking_tool"] == "gettimely.com"

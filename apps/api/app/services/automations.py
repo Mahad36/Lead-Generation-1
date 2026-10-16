@@ -68,21 +68,23 @@ INDUSTRIES: list[tuple[tuple[str, ...], list[str]]] = [
 ]
 DEFAULT_ORDER = ["instant_reply", "review_requests", "ai_assistant", "online_booking"]
 
+# Matched in the page HTML, so tools whose name is also an ordinary word ("timely", "podium", "broadly",
+# "boulevard", "weave") are matched by their web address only.
 BOOKING_TOOLS = (
     "calendly", "acuityscheduling", "setmore", "fresha", "vagaro", "zocdoc", "nexhealth", "localmed", "squareup.com/appointments",
     "booksy", "mindbodyonline", "jane.app", "simplybook", "youcanbook", "opentable", "resy.com", "sevenrooms",
-    "housecallpro", "servicetitan", "jobber", "flexbook", "solutionreach", "lighthouse360", "weave", "doctible",
-    "patientpop", "zenoti", "boulevard", "glossgenius", "schedulicity", "appointy", "booker.com", "tebra", "denticon",
-    "dentalhub", "yapi", "modento", "book.getweave", "phorest", "timely", "bookwhen", "picktime", "tidycal", "hubspot.com/meetings",
+    "housecallpro", "servicetitan", "getjobber.com", "flexbook", "solutionreach", "lighthouse360", "getweave.com", "doctible",
+    "patientpop", "zenoti", "joinblvd.com", "glossgenius", "schedulicity", "appointy", "booker.com", "tebra.com", "denticon",
+    "dentalhub", "yapiapp", "modento", "phorest.com", "gettimely.com", "bookwhen", "picktime", "tidycal", "hubspot.com/meetings",
 )
 CHAT_TOOLS = (
     "tawk.to", "livechatinc", "intercom", "drift.com", "crisp.chat", "tidio", "zdassets", "zopim", "js.usemessages",
-    "podium", "birdeye", "manychat", "botpress", "chatbase", "smith.ai", "olark", "freshchat", "livechat", "userlike",
+    "podium.com", "birdeye.com", "manychat", "botpress", "chatbase", "smith.ai", "olark", "freshchat", "livechatinc.com", "userlike",
     "chat-widget", "chatwidget", "gorgias", "kommunicate", "landbot", "voiceflow", "webchat", "leadconnector",
 )
 REVIEW_TOOLS = (
-    "birdeye", "podium", "trustindex", "elfsight", "grade.us", "trustpilot", "reviews.io", "judge.me", "yotpo",
-    "embedsocial", "reviewsonmywebsite", "google-reviews", "googlereviews", "featurable", "nicejob", "broadly",
+    "birdeye.com", "podium.com", "trustindex", "elfsight", "grade.us", "trustpilot", "reviews.io", "judge.me", "yotpo",
+    "embedsocial", "reviewsonmywebsite", "google-reviews", "googlereviews", "featurable", "nicejob", "broadly.com",
 )
 QUOTE_WORDS = re.compile(r"(free (quote|estimate)|get a (quote|estimate)|request a (quote|estimate)|quote request|estimate request)", re.I)
 BOOK_WORDS = re.compile(r"(book (now|online|an appointment|a consultation|your)|request an appointment|schedule (a|an|your) (visit|appointment|consultation))", re.I)
