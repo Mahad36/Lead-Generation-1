@@ -153,17 +153,19 @@ def _styles() -> dict[str, ParagraphStyle]:
 class PillHeading(Flowable):
     """Yellow rounded heading, like "Project Overview" / "Scope of Work" in the Canva pages."""
 
-    def __init__(self, text: str, size: float = 22, space_after: float = 14):
+    def __init__(self, text: str, size: float = 22, space_after: float = 14, space_before: float = 10):
         super().__init__()
         self.text, self.size, self.space_after = _clean(text), size, space_after
+        self.space_before = space_before
         self.font = _fonts()["black"]
         self.pad_x, self.pad_y = 12, 7
+        self.keepWithNext = 1  # never the last thing on a page: it moves with what follows
 
     def wrap(self, avail_w, avail_h):
         text_w = pdfmetrics.stringWidth(self.text, self.font, self.size)
         self.box_w = min(avail_w, text_w + 2 * self.pad_x)
         self.box_h = self.size + 2 * self.pad_y
-        return avail_w, self.box_h + self.space_after
+        return avail_w, self.space_before + self.box_h + self.space_after
 
     def draw(self):
         c = self.canv
@@ -360,7 +362,10 @@ def _status(ok: bool | None, styles) -> Paragraph:
 def _finding_block(finding: dict, styles) -> KeepTogether:
     label, color = SEVERITY.get(finding.get("severity", "medium"), SEVERITY["medium"])
     where = " | ".join(x for x in (finding.get("category"), finding.get("where")) if x)
-    tags = Table([[Tag(label, color), Paragraph(_safe(where), styles["small"])]], colWidths=[None, None], hAlign="LEFT")
+    tag = Tag(label, color)
+    tag_w = tag.wrap(0, 0)[0]
+    tags = Table([[tag, Paragraph(_safe(where), styles["small"])]], colWidths=[tag_w + 8, CONTENT_W - 32 - tag_w - 8],
+                 hAlign="LEFT")
     tags.setStyle(TableStyle([("LEFTPADDING", (0, 0), (-1, -1), 0), ("RIGHTPADDING", (0, 0), (0, 0), 8),
                               ("VALIGN", (0, 0), (-1, -1), "MIDDLE"), ("TOPPADDING", (0, 0), (-1, -1), 0),
                               ("BOTTOMPADDING", (0, 0), (-1, -1), 0)]))
@@ -443,6 +448,18 @@ def _as_jpeg(path: str, max_px: int = 1400) -> io.BytesIO:
         img.save(data, "JPEG", quality=80, optimize=True)
     data.seek(0)
     return data
+
+
+def _first_sentence(text: str, limit: int) -> str:
+    """The first sentence (or two short ones) within `limit` characters; cut at a word only if one is too long."""
+    text = re.sub(r"\s+", " ", str(text or "")).strip()
+    sentences = re.split(r"(?<=[.!?])\s+", text)
+    out = ""
+    for sentence in sentences:
+        if len(out) + len(sentence) + 1 > limit:
+            break
+        out = f"{out} {sentence}".strip()
+    return out or _short(text, limit)
 
 
 def _short(text: str, limit: int) -> str:
@@ -644,21 +661,26 @@ def build_audit_pdf(
         canvas.setFillColor(colors.white)
         canvas.setFont(f["label"], 16)
         canvas.drawString(62, PAGE_H - 530, generated_at.strftime("%d.%m.%Y"))
-        canvas.setFont(f["body"], 12)
-        canvas.drawString(62, PAGE_H - 550, domain[:60])
         # Presented to / by
         _pill(canvas, 62, 118, "PRESENTED TO", f["label"], 10.5)
         _pill(canvas, 296, 118, "PRESENTED BY", f["label"], 10.5)
         canvas.setFillColor(colors.white)
-        to_size = _fit_size(business.upper(), f["black"], 17, 215, min_size=10)
-        canvas.setFont(f["black"], to_size)
-        canvas.drawString(62, 90, business.upper())
-        canvas.setFont(f["black"], 19)
-        canvas.drawString(296, 90, company)
+        # Both names in the same font and size (the smaller one that fits its 215-point column), each with its
+        # website underneath; a long business name wraps onto a second line instead of shrinking to nothing
+        col_w = 215
+        size = min(_fit_size(company, f["black"], 19, col_w, min_size=15), _fit_size(business, f["black"], 19, col_w, min_size=15))
+        to_lines = _wrap_lines(business, f["black"], size, col_w)[:2]
+        top = 90 + (size + 3) * (len(to_lines) - 1)  # first line moves up so the last one stays on the baseline
+        canvas.setFont(f["black"], size)
+        for index, line in enumerate(to_lines):
+            canvas.drawString(62, top - index * (size + 3), line)
+        canvas.drawString(296, top, company)
+        canvas.setFont(f["body"], 12)
+        if domain:
+            canvas.drawString(62, 70, domain[:34])
         if company_site:
-            canvas.setFont(f["body"], 12)
-            canvas.drawString(296, 70, company_site[:40])
-            width = canvas.stringWidth(company_site[:40], f["body"], 12)
+            canvas.drawString(296, 70, company_site[:34])
+            width = canvas.stringWidth(company_site[:34], f["body"], 12)
             href = company_url if company_url.startswith("http") else f"https://{company_url}"
             canvas.linkURL(href, (296, 66, 296 + width, 82), relative=0)  # clickable in the PDF
         canvas.restoreState()
@@ -782,7 +804,7 @@ def build_audit_pdf(
         for item in categories[:6]:
             cell = [ScoreBar(item.get("category") or "", item.get("score"))]
             if item.get("summary"):
-                cell.append(Paragraph(_safe(_short(item["summary"], 110)), styles["small"]))
+                cell.append(Paragraph(_safe(_first_sentence(item["summary"], 170)), styles["small"]))
             cells.append(cell)
         rows = [cells[i:i + 2] + [""] * (2 - len(cells[i:i + 2])) for i in range(0, len(cells), 2)]
         grid = Table(rows, colWidths=[CONTENT_W / 2] * 2)
@@ -802,19 +824,24 @@ def build_audit_pdf(
     platform = platform or {}
     platform_name = platform.get("name") or report.get("platform") or ""
     if opportunities or (platform_name and platform_name != "Unknown"):
-        story += [CondPageBreak(90 * mm), PillHeading("Your Website Platform"),
-                  Paragraph(_safe(platform_intro({**platform, "name": platform_name})), styles["body"]), Spacer(1, 10)]
-        story += [_platform_block(item, platform_name, styles) for item in opportunities[:5]]
+        blocks = [_platform_block(item, platform_name, styles) for item in opportunities[:5]]
+        # The heading, its intro and the first card stay together (never a heading alone at the foot of a page)
+        story.append(KeepTogether([PillHeading("Your Website Platform"),
+                                   Paragraph(_safe(platform_intro({**platform, "name": platform_name})), styles["body"]),
+                                   Spacer(1, 10), *blocks[:1]]))
+        story += blocks[1:]
 
     # ---- What could run automatically: automations fitted to this business and what its site shows
     automations = [a for a in report.get("automation_opportunities") or [] if a.get("title") and a.get("recommendation")]
     if automations:
-        story += [CondPageBreak(90 * mm), PillHeading("What Could Run Automatically"),
-                  Paragraph(_safe(
-                      "A few things your website and front desk could handle on their own, so enquiries and bookings "
-                      "don't wait for someone to be free. Each one is based on what we saw on your site."
-                  ), styles["body"]), Spacer(1, 10)]
-        story += [_automation_block(item, styles) for item in automations[:3]]
+        blocks = [_automation_block(item, styles) for item in automations[:3]]
+        story.append(KeepTogether([PillHeading("What Could Run Automatically"),
+                                   Paragraph(_safe(
+                                       "A few things your website and front desk could handle on their own, so "
+                                       "enquiries and bookings don't wait for someone to be free. Each one is based on "
+                                       "what we saw on your site."
+                                   ), styles["body"]), Spacer(1, 10), *blocks[:1]]))
+        story += blocks[1:]
 
     # ---- What works + action plan
     strengths = report.get("strengths") or []

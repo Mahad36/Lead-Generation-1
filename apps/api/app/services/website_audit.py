@@ -616,7 +616,7 @@ def _saved_screenshots(audit_id: str) -> dict:
     }
 
 
-PDF_VERSION = 2  # 2: the "Your Website Platform" section
+PDF_VERSION = 3  # 2: the "Your Website Platform" section; 3: layout fixes (cover, headings, tags, score summaries)
 
 # Add-ons worth naming to the business owner (not analytics / CDN plumbing)
 PDF_ADDON_CATEGORIES = ("platform", "page_builder", "forms", "booking", "reviews", "email", "performance",
