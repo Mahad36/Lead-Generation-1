@@ -50,6 +50,15 @@ FALSE_POSITIVE_DOMAINS = {
     "mydomain.com",
     "mywebsite.com",
     "mycompany.com",
+    # site builders' own domains: their template placeholders (e.g. filler@godaddy.com), never a business inbox
+    "godaddy.com",
+    "secureserver.net",
+    "editmysite.com",
+    "squarespace.com",
+    "wix.com",
+    "weebly.com",
+    "duda.co",
+    "domain.tld",
 }
 
 FALSE_POSITIVE_LOCAL = {
@@ -88,6 +97,10 @@ FALSE_POSITIVE_LOCAL = {
     "somebody",
     "sample",
     "demo",
+    "filler",
+    "placeholder",
+    "lorem",
+    "loremipsum",
 }
 
 EMAIL_RE = re.compile(
