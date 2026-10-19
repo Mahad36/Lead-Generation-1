@@ -28,6 +28,11 @@ class SettingsOut(BaseModel):
     track_opens: bool = True
     health_policy: str = "strict"
     automation_offers: str = ""
+    email_verifier_provider: str = ""
+    email_verifier_scope: str = "risky"
+    email_verifier_monthly_limit: int = 100
+    email_verifier_usage: dict = {}
+    email_verifier_key_set: bool = False
     portfolio_sheet_url: str = ""
     contact_email: str
     contact_phone: str
@@ -85,6 +90,10 @@ class SettingsUpdate(BaseModel):
     track_opens: bool | None = None
     health_policy: Literal["strict", "balanced"] | None = None
     automation_offers: str | None = None  # comma-separated automation keys you offer ("" = none)
+    email_verifier_provider: Literal["", "zerobounce", "hunter"] | None = None
+    email_verifier_key: str | None = None  # stored encrypted; never returned
+    email_verifier_scope: Literal["risky", "all"] | None = None
+    email_verifier_monthly_limit: int | None = Field(default=None, ge=0, le=100000)
     portfolio_sheet_url: str | None = None
     contact_email: str | None = None
     contact_phone: str | None = None

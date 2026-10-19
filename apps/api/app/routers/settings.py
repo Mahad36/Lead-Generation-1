@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
@@ -29,8 +30,9 @@ _SKIP_COLUMNS = {
     "encrypted_ai_api_key",
     "encrypted_google_client_secret",
     "encrypted_apify_token",
+    "encrypted_email_verifier_key",
 }
-_SECRET_FIELDS = {"ai_api_key", "google_client_secret", "apify_token"}
+_SECRET_FIELDS = {"ai_api_key", "google_client_secret", "apify_token", "email_verifier_key"}
 
 
 def _ai_error_message(exc: Exception) -> str:
@@ -55,6 +57,10 @@ def _payload(db: Session, user: User) -> dict:
     data["google_client_secret_set"] = bool(settings.encrypted_google_client_secret) or bool(app.google_client_secret)
     data["ai_configured"] = ai_is_configured(db, user.id)
     data["apify_token_set"] = bool(settings.encrypted_apify_token) or bool(app.apify_token)
+    data["email_verifier_key_set"] = bool(settings.encrypted_email_verifier_key)
+    from app.services.email_verification import usage_summary
+
+    data["email_verifier_usage"] = usage_summary(settings)  # this month's checks, against your monthly limit
     data["apify_configured"] = bool(resolve_apify_token(db, user.id))
     data["scraper_provider"] = resolve_scraper_provider(db, user.id)
     data["google_oauth_configured"] = google_oauth_is_configured(db, user.id)
@@ -91,6 +97,7 @@ def update_settings(
     ai_api_key = data.pop("ai_api_key", None)
     google_client_secret = data.pop("google_client_secret", None)
     apify_token = data.pop("apify_token", None)
+    verifier_key = data.pop("email_verifier_key", None)
     if data.get("scraper_provider") == "apify" and not (
         (isinstance(apify_token, str) and apify_token.strip()) or resolve_apify_token(db, user.id)
     ):
@@ -142,6 +149,8 @@ def update_settings(
         settings.encrypted_google_client_secret = encrypt_text(google_client_secret.strip())
     if isinstance(apify_token, str) and apify_token.strip():
         settings.encrypted_apify_token = encrypt_text(apify_token.strip())
+    if isinstance(verifier_key, str) and verifier_key.strip():
+        settings.encrypted_email_verifier_key = encrypt_text(verifier_key.strip())
     if services is not None:
         db.query(UserService).filter(UserService.user_id == user.id).delete()
         for index, item in enumerate(services):
@@ -169,6 +178,34 @@ def update_settings(
 
         set_day_start_hour(settings.day_start_hour)  # daily limits now reset at this hour
     return _payload(db, user)
+
+
+class VerifierTestIn(BaseModel):
+    provider: str = ""
+    key: str = ""  # empty: the saved key
+
+
+@router.post("/email-verifier/test")
+def test_email_verifier(
+    data: VerifierTestIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)
+):
+    """Check the verification key without spending a check (the provider's account / credits endpoint)."""
+    from app.services.email_verification import VerifierError, account_status
+    from app.utils.crypto import decrypt_text
+
+    settings = db.query(UserSettings).filter(UserSettings.user_id == user.id).first()
+    provider = data.provider or (settings.email_verifier_provider if settings else "")
+    key = data.key.strip() or (
+        decrypt_text(settings.encrypted_email_verifier_key) if settings and settings.encrypted_email_verifier_key else ""
+    )
+    if not key:
+        raise HTTPException(status_code=400, detail="Paste the API key first.")
+    try:
+        return {"message": account_status(provider, key)}
+    except VerifierError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Couldn't reach the provider: {str(exc)[:160]}") from exc
 
 
 @router.get("/portfolio")

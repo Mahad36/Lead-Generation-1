@@ -52,6 +52,14 @@ class IdsIn(BaseModel):
     ids: list[str] = []
 
 
+@router.get("/domains")
+def domains(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Your own sending domains: inboxes, last 30 days' emails and bounce rate (Gmail judges the whole domain)."""
+    from app.services.health_alerts import domain_overview
+
+    return domain_overview(db, user.id)
+
+
 @router.post("/notified")
 def mark_notified(data: IdsIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     now = datetime.now(UTC)

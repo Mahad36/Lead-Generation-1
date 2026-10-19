@@ -38,6 +38,7 @@ from app.services.website_audit import (
     send_audit,
     start_audit,
 )
+from app.services.email_verification import verification_problem
 from app.services.deliverability import WAITING_FOR_SCHEDULE, WAITING_FOR_WINDOW, address_problem, waiting_step
 from app.utils.dates import local_day_start
 
@@ -385,7 +386,10 @@ def poll_job(db: Session, job: ScrapingJob) -> int:
         return 0
     started = 0
     for lead in candidate_leads_query(db, job.user_id, job.id).limit(room).all():
-        problem = address_problem(db, job.user_id, lead.primary_email)
+        # Free checks first, then (if set up) the verification provider for risky leads: before any Claude tokens
+        problem = address_problem(db, job.user_id, lead.primary_email) or verification_problem(
+            db, job.user_id, lead, lead.primary_email
+        )
         if problem:
             # Don't spend an audit on an email that would bounce
             lead.email_status = "undeliverable"

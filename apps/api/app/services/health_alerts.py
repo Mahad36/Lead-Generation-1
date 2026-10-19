@@ -184,6 +184,41 @@ def inbox_alerts(db: Session, account: EmailAccount) -> tuple[list[dict], set[st
 # ---------------------------------------------------------------- per own domain
 
 
+DOMAIN_BOUNCE_WARN, DOMAIN_BOUNCE_CRITICAL, DOMAIN_BOUNCE_MIN = 0.02, 0.05, 20
+
+
+def domain_bounce_stats(db: Session, accounts: list[EmailAccount]) -> dict:
+    """Emails sent from all of a domain's inboxes in the last 30 days, and how many bounced."""
+    since = datetime.now(UTC) - timedelta(days=30)
+    sent, bounced = (
+        db.query(func.count(EmailMessage.id), func.count(EmailMessage.bounced_at))
+        .filter(
+            EmailMessage.email_account_id.in_([a.id for a in accounts]),
+            EmailMessage.sent_at >= since,
+            EmailMessage.is_test.is_(False),
+        )
+        .one()
+    )
+    return {"sent": sent or 0, "bounced": bounced or 0, "rate": (bounced or 0) / sent if sent else 0.0}
+
+
+def domain_overview(db: Session, user_id: str) -> list[dict]:
+    """Per own domain (not gmail.com): its inboxes, the last 30 days' sending and bounce rate."""
+    by_domain: dict[str, list[EmailAccount]] = {}
+    for account in db.query(EmailAccount).filter(EmailAccount.user_id == user_id, EmailAccount.status != "disconnected"):
+        if _domain(account) not in FREE_MAIL:
+            by_domain.setdefault(_domain(account), []).append(account)
+    return [
+        {
+            "domain": domain,
+            "inboxes": sorted(a.email_address for a in accounts),
+            **domain_bounce_stats(db, accounts),
+            "target": DOMAIN_BOUNCE_WARN,
+        }
+        for domain, accounts in sorted(by_domain.items())
+    ]
+
+
 def blacklist_listings(domain: str) -> list[str] | None:
     """Lists the domain is on; None when no list could be asked."""
     listed, answered = [], 0
@@ -254,6 +289,20 @@ def domain_alerts(db: Session, domain: str, accounts: list[EmailAccount], force:
                 "Stop cold outreach from this domain now. Find the reason and request removal on the list's own "
                 "website (free); outreach can resume a few weeks after removal.",
             ))
+
+    keys.add(f"domain_bounces:{domain}")
+    stats = domain_bounce_stats(db, accounts)
+    if stats["sent"] >= DOMAIN_BOUNCE_MIN and stats["rate"] >= DOMAIN_BOUNCE_WARN:
+        found.append(_alert(
+            f"domain_bounces:{domain}", "domain_bounces",
+            "critical" if stats["rate"] >= DOMAIN_BOUNCE_CRITICAL else "warning", domain,
+            f"{domain} bounce rate: {stats['rate']:.1%}",
+            f"{stats['bounced']} of the {stats['sent']} emails sent from {domain} in the last 30 days bounced. Gmail "
+            "and Outlook judge the whole domain, not just each inbox; under 2% is the safe zone.",
+            "Send to business types with active websites (dentists, med spas, independent jewellers), skip chains, "
+            "keep 5-10 a day per inbox, and consider turning on email verification for risky leads "
+            "(AI & settings -> Sending).",
+        ))
 
     total = sum(x.daily_limit or 0 for x in accounts)
     if len(accounts) > 1 and total > SAFE_DAILY_PER_DOMAIN:

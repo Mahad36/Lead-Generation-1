@@ -846,10 +846,12 @@ def send_claimed_lead(db: Session, campaign_lead: CampaignLead) -> str:
         campaign_lead.locked_at = None
         db.commit()
         return "failed"
-    problem = address_problem(db, campaign.user_id, to)
+    from app.services.email_verification import verification_problem
+
+    problem = address_problem(db, campaign.user_id, to) or verification_problem(db, campaign.user_id, lead, to)
     if problem:
         campaign_lead.status = "skipped"
-        campaign_lead.skip_reason = "email_domain_rejects_mail"
+        campaign_lead.skip_reason = "email_domain_rejects_mail" if "domain" in problem else "mailbox_does_not_exist"
         campaign_lead.error_message = problem
         campaign_lead.locked_at = None
         db.commit()
@@ -1164,6 +1166,11 @@ def advance_audit_campaign(db: Session, campaign: Campaign) -> tuple[str, int | 
         reason = "previously_contacted"
     elif address_problem(db, campaign.user_id, lead.primary_email):
         reason = "email_domain_rejects_mail"
+    else:
+        from app.services.email_verification import verification_problem
+
+        if verification_problem(db, campaign.user_id, lead, lead.primary_email):
+            reason = "mailbox_does_not_exist"  # checked before the audit, so no Claude tokens are spent on it
     if reason:
         claimed.status = "unsubscribed" if reason == "suppressed" else "skipped"
         claimed.skip_reason, claimed.locked_at, claimed.locked_by = reason, None, ""

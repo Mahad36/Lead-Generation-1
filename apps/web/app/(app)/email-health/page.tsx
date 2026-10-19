@@ -22,6 +22,43 @@ type Alert = {
   holds_sending: boolean;
 };
 type Alerts = { open: Alert[]; resolved: Alert[] };
+type DomainStat = { domain: string; inboxes: string[]; sent: number; bounced: number; rate: number; target: number };
+
+/** Gmail and Outlook judge the whole domain, not only each inbox: its bounce rate across all its inboxes. */
+function DomainCard({ d }: { d: DomainStat }) {
+  const pct = (d.rate * 100).toFixed(1);
+  const tone = d.sent < 20 ? "default" : d.rate >= 0.05 ? "bad" : d.rate >= d.target ? "warn" : "ok";
+  const bar = Math.min(d.rate / 0.06, 1) * 100;
+  return (
+    <div className="space-y-2 rounded-lg border border-border p-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="font-medium">{d.domain}</div>
+        <Badge tone={tone}>
+          {d.sent < 20 ? "Too few emails to judge yet" : d.rate >= d.target ? "Above the 2% safe zone" : "Healthy"}
+        </Badge>
+      </div>
+      <div className="text-sm">
+        Bounce rate (last 30 days): <span className="text-lg font-semibold">{pct}%</span>{" "}
+        <span className="text-muted">
+          ({d.bounced} of {d.sent} emails, from {d.inboxes.length} inbox{d.inboxes.length === 1 ? "" : "es"})
+        </span>
+      </div>
+      <div className="relative h-2 rounded-full bg-background">
+        <div
+          className={`h-2 rounded-full ${d.rate >= 0.05 ? "bg-red-500" : d.rate >= d.target ? "bg-yellow-500" : "bg-green-600"}`}
+          style={{ width: `${Math.max(bar, 2)}%` }}
+        />
+        <div className="absolute top-[-3px] h-3.5 w-0.5 bg-foreground" style={{ left: `${(d.target / 0.06) * 100}%` }} title="2% target" />
+      </div>
+      <div className="flex justify-between text-xs text-muted">
+        <span>0%</span>
+        <span>2% target</span>
+        <span>6%+</span>
+      </div>
+      <p className="text-xs text-muted">{d.inboxes.join(" · ")}</p>
+    </div>
+  );
+}
 
 /** What each number on an inbox's "Sending health" card means, and where it starts to hurt. */
 const GUIDE: { signal: string; good: string; watch: string; act: string }[] = [
@@ -114,12 +151,16 @@ export default function EmailHealthPage() {
   const [checking, setChecking] = useState(false);
   const [permission, setPermission] = useState<string>("unsupported");
   const [policy, setPolicy] = useState<"strict" | "balanced" | "">("");
+  const [domains, setDomains] = useState<DomainStat[]>([]);
 
   useEffect(() => {
     api<Alerts>("/api/health-alerts")
       .then(setData)
       .catch((e) => toast.error(e.message));
     api("/api/health-alerts/read", { method: "POST" }).catch(() => undefined);
+    api<DomainStat[]>("/api/health-alerts/domains")
+      .then(setDomains)
+      .catch(() => undefined);
     api<{ health_policy?: "strict" | "balanced" }>("/api/settings")
       .then((s) => setPolicy(s.health_policy || "strict"))
       .catch(() => undefined);
@@ -214,6 +255,20 @@ export default function EmailHealthPage() {
           </div>
         </Card>
       )}
+
+      {domains.length ? (
+        <Card className="space-y-2">
+          <div className="font-medium">Your domain{domains.length > 1 ? "s" : ""}</div>
+          <p className="text-sm text-muted">
+            Gmail and Outlook judge your whole domain as well as each inbox, so this is the number to keep under 2%.
+          </p>
+          <div className="grid gap-3 sm:grid-cols-2">
+            {domains.map((d) => (
+              <DomainCard key={d.domain} d={d} />
+            ))}
+          </div>
+        </Card>
+      ) : null}
 
       <Card className="space-y-2">
         <div className="font-medium">Account health protection</div>

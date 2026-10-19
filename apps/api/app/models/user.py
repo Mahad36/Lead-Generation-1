@@ -1,7 +1,7 @@
 from datetime import datetime
 
 from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -93,6 +93,13 @@ class UserSettings(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     require_approval_before_sending: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     skip_previously_contacted: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     require_verified_emails: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # Optional mailbox verification before an audit (services/email_verification.py): "", "zerobounce", "hunter"
+    email_verifier_provider: Mapped[str] = mapped_column(String(32), default="", server_default="", nullable=False)
+    encrypted_email_verifier_key: Mapped[str] = mapped_column(Text, default="", server_default="", nullable=False)
+    email_verifier_scope: Mapped[str] = mapped_column(String(16), default="risky", server_default="risky", nullable=False)
+    email_verifier_monthly_limit: Mapped[int] = mapped_column(Integer, default=100, server_default="100", nullable=False)
+    # {"month": "2026-10", "used": 12, "exhausted": false}: stays within the provider's free allowance
+    email_verifier_usage: Mapped[dict] = mapped_column(JSONB, default=dict, server_default="{}", nullable=False)
     respect_suppression_list: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
     # Automatic audit poller: audits new leads and emails the report without manual steps

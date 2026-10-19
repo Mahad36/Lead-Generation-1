@@ -627,3 +627,144 @@ def test_file_audits_pause_when_sending_is_full_and_resume(db, monkeypatch):
     assert auto_audits.poll_job(db, job) == 2  # only as many as can still be sent today
     db.refresh(job)
     assert job.extra["audit_hold"] == ""
+
+
+# ---------------------------------------------------------------- email verification (provider simulated)
+
+
+@pytest.fixture
+def verifier(db, monkeypatch):
+    """A user with ZeroBounce set up; returns (user, calls, set_answer) with the provider simulated."""
+    from app.models import UserSettings
+    from app.services import email_verification
+    from app.utils.crypto import encrypt_text
+
+    user = make_user(db)
+    settings = db.query(UserSettings).filter(UserSettings.user_id == user.id).one()
+    settings.email_verifier_provider = "zerobounce"
+    settings.encrypted_email_verifier_key = encrypt_text("test-key")
+    settings.email_verifier_monthly_limit = 3
+    db.commit()
+    calls, answer = [], {"status": "invalid"}
+
+    def fake(provider, key, email):
+        calls.append(email)
+        if answer.get("raise"):
+            raise answer["raise"]
+        return {"status": answer["status"], "detail": "mailbox_not_found", "raw": {}}
+
+    monkeypatch.setattr(email_verification, "verify_with", fake)
+    return user, calls, answer
+
+
+def lead_for(db, user, email, website, category="Dentist"):
+    from app.models import Lead
+
+    lead = Lead(user_id=user.id, business_name="B", primary_email=email, website_url=website, category=category)
+    db.add(lead)
+    db.commit()
+    return lead
+
+
+def test_verification_skips_leads_that_are_not_risky(db, verifier):
+    from app.services.email_verification import verification_problem
+
+    user, calls, _ = verifier
+    lead = lead_for(db, user, "info@smile.com", "https://www.smile.com/")
+    assert verification_problem(db, user.id, lead, lead.primary_email) == "" and calls == []
+
+
+def test_off_domain_address_is_checked_once_and_blocked_when_dead(db, verifier):
+    from app.models import Lead, LeadEmail
+    from app.services.email_verification import verification_problem
+
+    user, calls, _ = verifier
+    lead = lead_for(db, user, "info@lpdentalcosmetic.com", "https://www.lpdentalandcosmetic.com/")
+    problem = verification_problem(db, user.id, lead, lead.primary_email)
+    assert "doesn't exist" in problem and calls == ["info@lpdentalcosmetic.com"]
+    assert db.get(Lead, lead.id).email_verification_status == "invalid"
+    stored = db.query(LeadEmail).filter(LeadEmail.lead_id == lead.id).one()
+    assert stored.verification_details["why_checked"] == "the address isn't on the website's own domain"
+    assert verification_problem(db, user.id, lead, lead.primary_email) and len(calls) == 1  # cached, no new check
+
+
+def test_high_bounce_business_types_are_checked(db, verifier):
+    from app.models import EmailMessage
+    from app.services.email_verification import verification_problem
+
+    user, calls, answer = verifier
+    answer["status"] = "valid"
+    account = make_account(db, user, "a@gmail.com")
+    for i in range(10):  # plumbers: 2 of 10 bounced in your sending
+        old = lead_for(db, user, f"p{i}@plumb{i}.com", f"https://plumb{i}.com", category="Plumber")
+        db.add(EmailMessage(user_id=user.id, email_account_id=account.id, lead_id=old.id, recipient_email=old.primary_email,
+                            subject="s", status="sent", sent_at=datetime.now(UTC),
+                            bounced_at=datetime.now(UTC) if i < 2 else None))
+    db.commit()
+    lead = lead_for(db, user, "info@newplumber.com", "https://newplumber.com", category="Plumber")
+    assert verification_problem(db, user.id, lead, lead.primary_email) == "" and calls == ["info@newplumber.com"]
+
+
+def test_monthly_limit_and_used_up_allowance_never_stop_outreach(db, verifier):
+    from app.models import UserSettings
+    from app.services.email_verification import VerifierError, verification_problem
+
+    user, calls, answer = verifier
+    for i in range(3):
+        verification_problem(db, user.id, lead_for(db, user, f"x{i}@other{i}.com", f"https://site{i}.com"), f"x{i}@other{i}.com")
+    assert len(calls) == 3
+    assert verification_problem(db, user.id, lead_for(db, user, "y@other.com", "https://site.com"), "y@other.com") == ""
+    assert len(calls) == 3  # limit of 3 reached: not checked, and not blocked
+    settings = db.query(UserSettings).filter(UserSettings.user_id == user.id).one()
+    settings.email_verifier_monthly_limit, settings.email_verifier_usage = 10, {}
+    db.commit()
+    answer["raise"] = VerifierError("ZeroBounce: out of credits", quota=True)
+    assert verification_problem(db, user.id, lead_for(db, user, "z@other.com", "https://s.com"), "z@other.com") == ""
+    db.refresh(settings)
+    assert settings.email_verifier_usage["exhausted"] is True
+
+
+def test_provider_answers_are_mapped(monkeypatch):
+    from app.services import email_verification as ev
+
+    class Response:
+        def __init__(self, data, code=200):
+            self._data, self.status_code, self.content = data, code, b"x"
+
+        def json(self):
+            return self._data
+
+    answers = {
+        "zb_invalid": Response({"status": "invalid", "sub_status": "mailbox_not_found"}),
+        "zb_catch": Response({"status": "catch-all", "sub_status": ""}),
+        "hu_invalid": Response({"data": {"status": "invalid", "result": "undeliverable"}}),
+        "hu_valid": Response({"data": {"status": "valid", "result": "deliverable"}}),
+        "hu_quota": Response({"errors": [{"details": "You have reached your usage limit"}]}, 429),
+    }
+    current = {}
+    monkeypatch.setattr(ev.httpx, "get", lambda *a, **k: answers[current["k"]])
+    for k, provider, expected in [("zb_invalid", "zerobounce", "invalid"), ("zb_catch", "zerobounce", "accept_all"),
+                                  ("hu_invalid", "hunter", "invalid"), ("hu_valid", "hunter", "valid")]:
+        current["k"] = k
+        assert ev.verify_with(provider, "key", "a@b.com")["status"] == expected
+    current["k"] = "hu_quota"
+    with pytest.raises(ev.VerifierError) as err:
+        ev.verify_with("hunter", "key", "a@b.com")
+    assert err.value.quota
+
+
+def test_domain_bounce_overview(db):
+    from app.models import EmailMessage
+    from app.services.health_alerts import domain_overview
+
+    user = make_user(db)
+    a = make_account(db, user, "ahad@beecreative.pk")
+    b = make_account(db, user, "hashir@beecreative.pk")
+    make_account(db, user, "someone@gmail.com")  # free mail: not a domain of yours
+    for account, bounces in ((a, 1), (b, 2)):
+        for i in range(25):
+            db.add(EmailMessage(user_id=user.id, email_account_id=account.id, recipient_email=f"r{i}@x.com", subject="s",
+                                status="sent", sent_at=datetime.now(UTC), bounced_at=datetime.now(UTC) if i < bounces else None))
+    db.commit()
+    [row] = domain_overview(db, user.id)
+    assert row["domain"] == "beecreative.pk" and row["sent"] == 50 and row["bounced"] == 3 and abs(row["rate"] - 0.06) < 1e-9

@@ -16,6 +16,130 @@ type AiProvider = {
   docs_url?: string;
 };
 
+/** Optional mailbox verification with a provider's free allowance (apps/api/app/services/email_verification.py). */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function EmailVerification({ s, set }: { s: any; set: (key: string, value: any) => void }) {
+  const [key, setKey] = useState("");
+  const [testing, setTesting] = useState(false);
+  const usage = s.email_verifier_usage || {};
+  const provider = s.email_verifier_provider || "";
+
+  async function test() {
+    setTesting(true);
+    try {
+      const res = await api<{ message: string }>("/api/settings/email-verifier/test", {
+        method: "POST",
+        body: JSON.stringify({ provider, key }),
+      });
+      toast.success(res.message);
+    } catch (e) {
+      toast.error((e as Error).message);
+    } finally {
+      setTesting(false);
+    }
+  }
+
+  return (
+    <div className="space-y-3 rounded-lg border border-border p-3">
+      <div>
+        <Label>Email verification before outreach (optional)</Label>
+        <p className="text-xs text-muted">
+          Checks whether a mailbox really exists before its audit starts, so a dead address costs no email and no
+          Claude tokens. Uses a verification service&apos;s free monthly allowance (ZeroBounce and Hunter both have one;
+          check their sites for the current amount). Only the address&apos;s result is stored; it&apos;s checked once.
+        </p>
+      </div>
+      <div className="grid gap-3 sm:grid-cols-2">
+        <div>
+          <Label>Service</Label>
+          <select
+            className="w-full rounded-md border border-border bg-card px-3 py-2 text-sm"
+            value={provider}
+            onChange={(e) => set("email_verifier_provider", e.target.value)}
+          >
+            <option value="">Off (free checks only)</option>
+            <option value="zerobounce">ZeroBounce</option>
+            <option value="hunter">Hunter</option>
+          </select>
+        </div>
+        {provider ? (
+          <div>
+            <Label>API key {s.email_verifier_key_set ? "(saved; paste to replace)" : ""}</Label>
+            <div className="flex gap-2">
+              <Input
+                type="password"
+                value={key}
+                placeholder={s.email_verifier_key_set ? "••••••••" : "Paste your API key"}
+                onChange={(e) => {
+                  setKey(e.target.value);
+                  set("email_verifier_key", e.target.value);
+                }}
+              />
+              <Button variant="secondary" disabled={testing} onClick={test}>
+                {testing ? "Testing..." : "Test key"}
+              </Button>
+            </div>
+          </div>
+        ) : null}
+      </div>
+      {provider ? (
+        <>
+          <div className="flex flex-wrap gap-4 text-sm">
+            <label className="flex items-start gap-2">
+              <input
+                type="radio"
+                className="mt-1"
+                checked={(s.email_verifier_scope || "risky") === "risky"}
+                onChange={() => set("email_verifier_scope", "risky")}
+              />
+              <span>
+                Risky leads only (recommended)
+                <span className="block text-xs text-muted">
+                  An address not on the website&apos;s own domain, or a business type that has bounced 5%+ for you.
+                  Makes a small free allowance last.
+                </span>
+              </span>
+            </label>
+            <label className="flex items-start gap-2">
+              <input
+                type="radio"
+                className="mt-1"
+                checked={s.email_verifier_scope === "all"}
+                onChange={() => set("email_verifier_scope", "all")}
+              />
+              <span>
+                Every lead
+                <span className="block text-xs text-muted">Uses the allowance faster.</span>
+              </span>
+            </label>
+          </div>
+          <div className="flex flex-wrap items-end gap-3">
+            <div>
+              <Label>Checks per month (stay within the free allowance)</Label>
+              <Input
+                type="number"
+                min={0}
+                className="w-32"
+                value={s.email_verifier_monthly_limit ?? 100}
+                onChange={(e) => set("email_verifier_monthly_limit", Number(e.target.value))}
+              />
+            </div>
+            <p className="pb-2 text-sm">
+              This month: <span className="font-medium">{usage.used ?? 0}</span> of {usage.limit ?? s.email_verifier_monthly_limit ?? 100}
+              {usage.exhausted ? " · the service says the allowance is used up; outreach carries on with the free checks" : ""}
+            </p>
+          </div>
+          <p className="text-xs text-muted">
+            Only a &ldquo;doesn&apos;t exist&rdquo; answer stops an email. &ldquo;Accepts every address&rdquo; or
+            &ldquo;unknown&rdquo; goes out as before, and when the monthly checks are used up nothing stops: the free
+            checks still apply.
+          </p>
+        </>
+      ) : null}
+    </div>
+  );
+}
+
 /** apps/api/app/services/automations.py::AUTOMATIONS */
 const AUTOMATION_OPTIONS: [string, string, string][] = [
   ["online_booking", "Online booking with automatic reminders", "Book any hour; confirmations and reminders go out by themselves."],
@@ -222,6 +346,7 @@ export default function SettingsPage() {
               </p>
             </div>
           </div>
+          <EmailVerification s={s} set={set} />
           <div className="rounded-lg border border-border p-3">
             <Label>Delay between emails from the same inbox (minutes, random each time)</Label>
             <div className="mt-1 flex flex-wrap items-center gap-2 text-sm">
