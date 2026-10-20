@@ -283,6 +283,38 @@ export default function SettingsPage() {
             </p>
           </div>
           <div className="rounded-lg border border-border p-3">
+            <Label>What your emails lead with</Label>
+            <div className="mt-2 grid gap-2 sm:grid-cols-3">
+              {(
+                [
+                  ["automation", "Automation first", "Opens with what the site shows that an automation would fix, pitches that automation; the website fix is a short supporting point. The PDF shows automations near the top."],
+                  ["balanced", "Balanced", "Opens with the main website finding, then one automation paragraph."],
+                  ["website", "Website first", "Website redesign and fixes; an automation only as an optional extra."],
+                ] as const
+              ).map(([key, title, hint]) => (
+                <label
+                  key={key}
+                  className={`cursor-pointer rounded-lg border px-3 py-2 text-sm ${
+                    (s.outreach_focus || "automation") === key ? "border-primary ring-2 ring-primary/30" : "border-border"
+                  }`}
+                >
+                  <input
+                    type="radio"
+                    className="mr-2"
+                    checked={(s.outreach_focus || "automation") === key}
+                    onChange={() => set("outreach_focus", key)}
+                  />
+                  <span className="font-medium">{title}</span>
+                  <span className="block text-xs text-muted">{hint}</span>
+                </label>
+              ))}
+            </div>
+            <p className="mt-2 text-xs text-muted">
+              Free offers follow the focus when you haven&apos;t written your own (e.g. a free automation plan). Your other
+              services (SEO, social media...) can come up in one sentence, only when the audit found something they fix.
+            </p>
+          </div>
+          <div className="rounded-lg border border-border p-3">
             <Label>Automations you offer</Label>
             <p className="mb-2 text-xs text-muted">
               Each audit picks the one that fits the business best, from what its website shows (e.g. booking by phone

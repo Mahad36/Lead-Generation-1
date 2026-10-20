@@ -105,3 +105,34 @@ def test_website_vendor_and_placeholder_addresses_are_never_leads():
         assert not is_plausible_email(junk), junk
     for real in ("aburke@onesothebysrealty.com", "info@borgesroofing.com", "owner@gmail.com", "info@dh-dental.co.uk"):
         assert is_plausible_email(real), real
+
+
+def test_free_offers_follow_the_outreach_focus():
+    from types import SimpleNamespace
+
+    from app.services.website_audit import AUTOMATION_FREE_OFFERS, DEFAULT_FREE_OFFERS, free_offers
+
+    assert free_offers(SimpleNamespace(free_offers="", outreach_focus="automation"))[0] == AUTOMATION_FREE_OFFERS[0]
+    assert free_offers(SimpleNamespace(free_offers="", outreach_focus="website")) == DEFAULT_FREE_OFFERS
+    assert free_offers(SimpleNamespace(free_offers="My own offer", outreach_focus="automation")) == ["My own offer"]
+
+
+def test_focus_reaches_the_analysis_prompt():
+    from app.services.audit_ai import build_audit_context
+
+    assert '"outreach_focus": "automation"' in build_audit_context(lead={}, site={}, performance={}, outreach_focus="automation")
+
+
+def test_pdf_puts_automations_first_when_automation_leads():
+    from datetime import UTC, datetime
+
+    report = {"overall_score": 60, "findings": [{"title": "Slow homepage", "severity": "high", "evidence": "e",
+                                                "impact": "i", "recommendation": "r"}],
+              "automation_opportunities": [{"key": "instant_reply", "title": "Reply to every enquiry within a minute",
+                                            "basis": "seen", "evidence": "e", "recommendation": "r", "business_relevance": "b"}]}
+    pdfs = {}
+    for first in (True, False):
+        pdfs[first] = build_audit_pdf(report=report, performance={"url": "https://x.com"}, lead={"business_name": "X"},
+                                      sender={"company_name": "Bee Creative"}, generated_at=datetime.now(UTC),
+                                      automation_first=first)
+    assert pdfs[True].startswith(b"%PDF") and pdfs[False].startswith(b"%PDF")

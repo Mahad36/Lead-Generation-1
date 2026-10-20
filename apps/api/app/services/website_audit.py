@@ -209,10 +209,27 @@ DEFAULT_FREE_OFFERS = [
 ]
 
 
+# Free offers that fit an automation-first email (used when you haven't written your own free offers)
+AUTOMATION_FREE_OFFERS = [
+    "A free automation plan for your business: the 2-3 tasks on your website and front desk that could run on "
+    "their own (enquiry replies, bookings, reminders, reviews), and what each would save you each week",
+    "A free short screen recording showing how the automation I suggested would work on your own website, "
+    "step by step, from the customer's side and yours",
+]
+
+
 def free_offers(settings: UserSettings | None) -> list[str]:
-    """The user's free offers (Settings, one per line), or sensible defaults."""
+    """The user's free offers (Settings, one per line), or defaults that fit the outreach focus."""
     lines = [line.strip(" -•\t") for line in ((settings.free_offers if settings else "") or "").splitlines()]
-    return [line for line in lines if line] or DEFAULT_FREE_OFFERS
+    own = [line for line in lines if line]
+    if own:
+        return own
+    focus = (settings.outreach_focus if settings else "") or "automation"
+    if focus == "automation":
+        return AUTOMATION_FREE_OFFERS + DEFAULT_FREE_OFFERS[:1]
+    if focus == "balanced":
+        return DEFAULT_FREE_OFFERS + AUTOMATION_FREE_OFFERS[:1]
+    return DEFAULT_FREE_OFFERS
 
 
 def _adds_signature(db: Session, audit: WebsiteAudit | None) -> bool:
@@ -252,6 +269,8 @@ def _sender_info(db: Session, user_id: str, audit: WebsiteAudit | None = None) -
         "company_description": settings.company_description if settings else "",
         "contact_email": settings.contact_email if settings else "",
         "services": services,
+        # automation: the email leads with the automation; balanced: website finding + one automation; website
+        "outreach_focus": (settings.outreach_focus if settings else "") or "automation",
         "free_offers": free_offers(settings),
         # The sending Gmail's own signature (name, title, links) is added under the email when it is sent.
         "signature_added": _signature_expected(db, user_id, audit),
@@ -653,6 +672,7 @@ def _build_pdf(audit: WebsiteAudit, lead: Lead, sender: dict, screenshots: dict)
         ai_model=audit.ai_model if audit.ai_provider in {"anthropic", "claude_code"} else "",
         screenshots=screenshots,
         platform=pdf_platform(audit),
+        automation_first=sender.get("outreach_focus") == "automation",
     )
     audit.pdf_data = pdf
     audit.site_data = {**(audit.site_data or {}), "pdf_version": PDF_VERSION}
@@ -740,6 +760,7 @@ def run_audit(db: Session, audit_id: str) -> str:
             timeout=settings.audit_ai_timeout_seconds,
             images=images,
             free_offers=_sender_info(db, audit.user_id)["free_offers"],
+            outreach_focus=_sender_info(db, audit.user_id)["outreach_focus"],
             portfolio=portfolio_sites,
         )
         report["reference_sites"] = keep_known(report.get("reference_sites") or [], portfolio_sites)

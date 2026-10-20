@@ -613,6 +613,20 @@ def _automation_block(item: dict, styles) -> KeepTogether:
     return KeepTogether([block, Spacer(1, 10)])
 
 
+def _add_automation_section(story: list, report: dict, styles) -> None:
+    """What could run automatically: automations fitted to this business and what its site shows."""
+    automations = [a for a in report.get("automation_opportunities") or [] if a.get("title") and a.get("recommendation")]
+    if automations:
+        blocks = [_automation_block(item, styles) for item in automations[:3]]
+        story.append(KeepTogether([PillHeading("What Could Run Automatically"),
+                                   Paragraph(_safe(
+                                       "A few things your website and front desk could handle on their own, so "
+                                       "enquiries and bookings don't wait for someone to be free. Each one is based on "
+                                       "what we saw on your site."
+                                   ), styles["body"]), Spacer(1, 10), *blocks[:1]]))
+        story += blocks[1:]
+
+
 def build_audit_pdf(
     *,
     report: dict,
@@ -623,6 +637,7 @@ def build_audit_pdf(
     ai_model: str = "",
     screenshots: dict | None = None,
     platform: dict | None = None,
+    automation_first: bool = False,
 ) -> bytes:
     """platform: {"name", "confidence_label", "addons": [...], "built_by"} for the "Your Website Platform" section."""
     f = _fonts()
@@ -813,6 +828,9 @@ def build_audit_pdf(
                                   ("TOPPADDING", (0, 0), (-1, -1), 0), ("BOTTOMPADDING", (0, 0), (-1, -1), 9)]))
         story += [CondPageBreak(60 * mm), KeepTogether([Paragraph("Scores at a glance", styles["h3"]), grid])]
 
+    if automation_first:  # the automation is what the email leads with
+        _add_automation_section(story, report, styles)
+
     # ---- Findings
     findings = report.get("findings") or []
     if findings:
@@ -831,17 +849,9 @@ def build_audit_pdf(
                                    Spacer(1, 10), *blocks[:1]]))
         story += blocks[1:]
 
-    # ---- What could run automatically: automations fitted to this business and what its site shows
-    automations = [a for a in report.get("automation_opportunities") or [] if a.get("title") and a.get("recommendation")]
-    if automations:
-        blocks = [_automation_block(item, styles) for item in automations[:3]]
-        story.append(KeepTogether([PillHeading("What Could Run Automatically"),
-                                   Paragraph(_safe(
-                                       "A few things your website and front desk could handle on their own, so "
-                                       "enquiries and bookings don't wait for someone to be free. Each one is based on "
-                                       "what we saw on your site."
-                                   ), styles["body"]), Spacer(1, 10), *blocks[:1]]))
-        story += blocks[1:]
+
+    if not automation_first:
+        _add_automation_section(story, report, styles)
 
     # ---- What works + action plan
     strengths = report.get("strengths") or []

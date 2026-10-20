@@ -197,7 +197,8 @@ Ground rules:
   (e.g. "Desktop hero", "Phone header", "Contact form"); evidence describes what you saw or measured.
 - action_plan: 3-6 steps ordered by impact (1 = do first). strengths: 2-4 genuine positives.
 - headline: one sentence, max 14 words. executive_summary: 90-150 words. conclusion: 40-80 words.
-- free_offer: pick ONE of the free_offers you are given, the one that best fixes this site's biggest problem.
+- free_offer: pick ONE of the free_offers you are given, the one that best fixes this site's biggest problem
+  (when outreach_focus is "automation", the one that fits the top automation opportunity instead).
   offer: one sentence describing exactly what this business would get (e.g. "A redesigned first screen for
   abcplumbing.com in Figma, with your phone number and a clear 'Book a plumber' button"). why: 1-2 sentences tying
   it to the findings above.
@@ -259,6 +260,16 @@ Rules:
   main finding); like a person's note, lower-case is fine. Examples: "Booking at Sharp Dentistry after 5pm",
   "What happens after someone requests a quote?", "your Book Now button, on mobile", "turning sales into Google
   reviews". Never use "AI", "automation", "boost", "free", "guaranteed", exclamation marks or ALL CAPS in it.
+- Focus (sender.outreach_focus):
+  "automation": the email is about the automation. Open with the thing you saw that the automation fixes (from
+  audit.automation's evidence: e.g. enquiries wait for a reply, bookings only by phone), then 2-3 sentences on what
+  would run automatically for this business and what it changes for them. Mention ONE website finding briefly, as
+  part of the same fix ("I'd also fix..."), not as the opening. The free offer follows the automation. If
+  audit.automation is missing, write it website-first instead.
+  "balanced": open with the main website finding, then the one automation paragraph (as above).
+  "website": website first; the automation sentence is optional.
+  In any focus you may mention ONE other service from sender.services in a single sentence, only when an audit
+  finding directly calls for it (e.g. SEO for missing titles); never a list of services.
 - Platform: when audit.platform is a named platform (anything except "", "Unknown" and "Custom-built"), include
   exactly one natural sentence with a platform-specific point taken from audit.platform_opportunities (or the
   outreach angle), naming the platform and the native way to fix it, e.g. "Since the site runs on WordPress with
@@ -430,13 +441,15 @@ def normalize_report(data: dict) -> dict:
 
 
 def build_audit_context(
-    *, lead: dict, site: dict, performance: dict, free_offers: list[str] | None = None, portfolio: dict | None = None
+    *, lead: dict, site: dict, performance: dict, free_offers: list[str] | None = None, portfolio: dict | None = None,
+    outreach_focus: str = "balanced",
 ) -> str:
     payload = {
         "business": lead,
         "website_crawl": site,
         "measurements": performance,
         "free_offers": free_offers or [],
+        "outreach_focus": outreach_focus,
         "portfolio": portfolio or {},  # {niche: [urls]} of sites the sender's team built
     }
     return (
@@ -456,9 +469,11 @@ def generate_audit_report(
     images: list[str] | None = None,
     free_offers: list[str] | None = None,
     portfolio: dict | None = None,
+    outreach_focus: str = "balanced",
 ) -> dict:
     prompt = build_audit_context(
-        lead=lead, site=site, performance=performance, free_offers=free_offers, portfolio=portfolio
+        lead=lead, site=site, performance=performance, free_offers=free_offers, portfolio=portfolio,
+        outreach_focus=outreach_focus,
     )
     text = provider.generate(
         prompt,
