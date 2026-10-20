@@ -1,0 +1,14 @@
+[Unit]
+Description=Mailbox checker (lead generation app)
+After=network-online.target
+
+[Service]
+User=checker
+WorkingDirectory=/opt/mailbox-checker
+EnvironmentFile=/opt/mailbox-checker/.env
+ExecStart=/opt/mailbox-checker/venv/bin/uvicorn verifier:app --host 127.0.0.1 --port 8090
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

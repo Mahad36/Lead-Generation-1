@@ -29,7 +29,7 @@ function EmailVerification({ s, set }: { s: any; set: (key: string, value: any) 
     try {
       const res = await api<{ message: string }>("/api/settings/email-verifier/test", {
         method: "POST",
-        body: JSON.stringify({ provider, key }),
+        body: JSON.stringify({ provider, key, url: s.email_verifier_url || "" }),
       });
       toast.success(res.message);
     } catch (e) {
@@ -58,13 +58,26 @@ function EmailVerification({ s, set }: { s: any; set: (key: string, value: any) 
             onChange={(e) => set("email_verifier_provider", e.target.value)}
           >
             <option value="">Off (free checks only)</option>
+            <option value="own">My own checker (apps/verifier on your server)</option>
             <option value="zerobounce">ZeroBounce</option>
             <option value="hunter">Hunter</option>
           </select>
         </div>
+        {provider === "own" ? (
+          <div>
+            <Label>Checker address</Label>
+            <Input
+              value={s.email_verifier_url || ""}
+              placeholder="https://verify.your-check-domain.com"
+              onChange={(e) => set("email_verifier_url", e.target.value)}
+            />
+          </div>
+        ) : null}
         {provider ? (
           <div>
-            <Label>API key {s.email_verifier_key_set ? "(saved; paste to replace)" : ""}</Label>
+            <Label>
+              {provider === "own" ? "Token" : "API key"} {s.email_verifier_key_set ? "(saved; paste to replace)" : ""}
+            </Label>
             <div className="flex gap-2">
               <Input
                 type="password"
@@ -113,7 +126,14 @@ function EmailVerification({ s, set }: { s: any; set: (key: string, value: any) 
               </span>
             </label>
           </div>
-          <div className="flex flex-wrap items-end gap-3">
+          {provider === "own" ? (
+            <p className="text-xs text-muted">
+              Your own checker has no monthly allowance, so &ldquo;Every lead&rdquo; is fine. It can&apos;t confirm
+              addresses on Google Workspace (Google accepts every address there): those come back &ldquo;accepts every
+              address&rdquo; and are sent as before.
+            </p>
+          ) : null}
+          <div className={`flex flex-wrap items-end gap-3 ${provider === "own" ? "hidden" : ""}`}>
             <div>
               <Label>Checks per month (stay within the free allowance)</Label>
               <Input

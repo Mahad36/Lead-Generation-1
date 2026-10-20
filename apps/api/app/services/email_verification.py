@@ -32,7 +32,7 @@ from app.utils.crypto import decrypt_text
 
 logger = get_logger("email_verify")
 
-PROVIDERS = {"zerobounce": "ZeroBounce", "hunter": "Hunter"}
+PROVIDERS = {"zerobounce": "ZeroBounce", "hunter": "Hunter", "own": "Your mailbox checker"}
 CHECKED = {"valid", "invalid", "accept_all", "unknown"}
 RISKY_BOUNCE_RATE, RISKY_MIN_SENT = 0.05, 10
 TIMEOUT = 20
@@ -47,8 +47,20 @@ class VerifierError(Exception):
 # ---------------------------------------------------------------- providers
 
 
-def verify_with(provider: str, key: str, email: str) -> dict:
+def verify_with(provider: str, key: str, email: str, url: str = "") -> dict:
     """{"status": valid | invalid | accept_all | unknown, "detail": str, "raw": {...}} from the provider."""
+    if provider == "own":
+        if not url:
+            raise VerifierError("Add your checker's address (e.g. https://verify.example.com).")
+        response = httpx.post(f"{url.rstrip('/')}/verify", json={"email": email},
+                              headers={"Authorization": f"Bearer {key}"}, timeout=60)
+        if response.status_code == 401:
+            raise VerifierError("Your checker didn't accept the token.")
+        if response.status_code >= 400:
+            raise VerifierError(f"Your checker answered HTTP {response.status_code}.")
+        data = response.json()
+        status = data.get("status") if data.get("status") in CHECKED else "unknown"
+        return {"status": status, "detail": str(data.get("detail") or "")[:200], "raw": data}
     if provider == "zerobounce":
         response = httpx.get(
             "https://api.zerobounce.net/v2/validate",
@@ -88,8 +100,21 @@ def verify_with(provider: str, key: str, email: str) -> dict:
     raise VerifierError(f"Unknown verification provider: {provider}")
 
 
-def account_status(provider: str, key: str) -> str:
+def account_status(provider: str, key: str, url: str = "") -> str:
     """Check the key without spending a check: what the provider says is left."""
+    if provider == "own":
+        if not url:
+            raise VerifierError("Add your checker's address first.")
+        response = httpx.get(f"{url.rstrip('/')}/status", headers={"Authorization": f"Bearer {key}"}, timeout=20)
+        if response.status_code == 401:
+            raise VerifierError("Your checker didn't accept the token.")
+        if response.status_code >= 400:
+            raise VerifierError(f"Your checker answered HTTP {response.status_code}.")
+        data = response.json()
+        if not data.get("port25"):
+            raise VerifierError("Your checker is up, but its server can't reach mail servers on port 25. Ask the "
+                                "hosting company to open outbound port 25.")
+        return f"Your checker works (checking as {data.get('mail_from')}, port 25 open)."
     if provider == "zerobounce":
         response = httpx.get("https://api.zerobounce.net/v2/getcredits", params={"api_key": key}, timeout=TIMEOUT)
         credits = str((response.json() if response.content else {}).get("Credits", ""))
@@ -185,11 +210,12 @@ def verification_problem(db: Session, user_id: str, lead: Lead | None, email: st
         if not reason:
             return ""
     usage = _usage(settings)
-    if usage.get("exhausted") or usage.get("used", 0) >= (settings.email_verifier_monthly_limit or 0):
+    own = settings.email_verifier_provider == "own"  # your own checker: no allowance to stay within
+    if not own and (usage.get("exhausted") or usage.get("used", 0) >= (settings.email_verifier_monthly_limit or 0)):
         return ""  # allowance used up this month: carry on as before
     try:
         key = decrypt_text(settings.encrypted_email_verifier_key)
-        result = verify_with(settings.email_verifier_provider, key, address)
+        result = verify_with(settings.email_verifier_provider, key, address, settings.email_verifier_url or "")
     except VerifierError as exc:
         logger.warning("email_verify_failed", provider=settings.email_verifier_provider, error=str(exc)[:200])
         if exc.quota:

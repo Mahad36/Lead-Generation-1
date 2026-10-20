@@ -29,6 +29,7 @@ class SettingsOut(BaseModel):
     health_policy: str = "strict"
     automation_offers: str = ""
     email_verifier_provider: str = ""
+    email_verifier_url: str = ""
     email_verifier_scope: str = "risky"
     email_verifier_monthly_limit: int = 100
     email_verifier_usage: dict = {}
@@ -90,7 +91,8 @@ class SettingsUpdate(BaseModel):
     track_opens: bool | None = None
     health_policy: Literal["strict", "balanced"] | None = None
     automation_offers: str | None = None  # comma-separated automation keys you offer ("" = none)
-    email_verifier_provider: Literal["", "zerobounce", "hunter"] | None = None
+    email_verifier_provider: Literal["", "zerobounce", "hunter", "own"] | None = None
+    email_verifier_url: str | None = Field(default=None, max_length=500)
     email_verifier_key: str | None = None  # stored encrypted; never returned
     email_verifier_scope: Literal["risky", "all"] | None = None
     email_verifier_monthly_limit: int | None = Field(default=None, ge=0, le=100000)

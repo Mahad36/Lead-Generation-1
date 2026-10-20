@@ -647,7 +647,7 @@ def verifier(db, monkeypatch):
     db.commit()
     calls, answer = [], {"status": "invalid"}
 
-    def fake(provider, key, email):
+    def fake(provider, key, email, url=""):
         calls.append(email)
         if answer.get("raise"):
             raise answer["raise"]
@@ -768,3 +768,31 @@ def test_domain_bounce_overview(db):
     db.commit()
     [row] = domain_overview(db, user.id)
     assert row["domain"] == "beecreative.pk" and row["sent"] == 50 and row["bounced"] == 3 and abs(row["rate"] - 0.06) < 1e-9
+
+
+def test_own_checker_end_to_end(monkeypatch):
+    """The app talks to apps/verifier over its real API (only the mail server's answer is simulated)."""
+    import sys
+    from pathlib import Path
+
+    from fastapi.testclient import TestClient
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "verifier"))
+    import verifier
+
+    from app.services import email_verification as ev
+
+    monkeypatch.setattr(verifier, "TOKEN", "secret")
+    answers = {"dead@acme.com": verifier.Result("invalid", "550 5.1.1 does not exist", "mx.acme.com"),
+               "info@acme.com": verifier.Result("valid", "250 OK", "mx.acme.com")}
+    monkeypatch.setattr(verifier, "check", lambda email: answers[email])
+    client = TestClient(verifier.app)
+    monkeypatch.setattr(ev.httpx, "post", lambda url, **k: client.post(url.replace("https://verify.test", ""), json=k["json"], headers=k["headers"]))
+    monkeypatch.setattr(ev.httpx, "get", lambda url, **k: client.get(url.replace("https://verify.test", ""), headers=k["headers"]))
+    monkeypatch.setattr(verifier.socket, "create_connection", lambda *a, **k: type("C", (), {"close": lambda self: None})())
+
+    assert ev.verify_with("own", "secret", "dead@acme.com", "https://verify.test")["status"] == "invalid"
+    assert ev.verify_with("own", "secret", "info@acme.com", "https://verify.test/")["status"] == "valid"
+    assert "works" in ev.account_status("own", "secret", "https://verify.test")
+    with pytest.raises(ev.VerifierError):
+        ev.verify_with("own", "wrong-token", "info@acme.com", "https://verify.test")

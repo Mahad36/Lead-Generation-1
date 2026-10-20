@@ -96,6 +96,8 @@ class UserSettings(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     # Optional mailbox verification before an audit (services/email_verification.py): "", "zerobounce", "hunter"
     email_verifier_provider: Mapped[str] = mapped_column(String(32), default="", server_default="", nullable=False)
     encrypted_email_verifier_key: Mapped[str] = mapped_column(Text, default="", server_default="", nullable=False)
+    # "own": your own checker (apps/verifier) at this address, e.g. https://verify.example.com
+    email_verifier_url: Mapped[str] = mapped_column(String(500), default="", server_default="", nullable=False)
     email_verifier_scope: Mapped[str] = mapped_column(String(16), default="risky", server_default="risky", nullable=False)
     email_verifier_monthly_limit: Mapped[int] = mapped_column(Integer, default=100, server_default="100", nullable=False)
     # {"month": "2026-10", "used": 12, "exhausted": false}: stays within the provider's free allowance

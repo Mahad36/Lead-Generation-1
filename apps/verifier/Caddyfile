@@ -1,0 +1,4 @@
+# Replace verify.YOUR-CHECK-DOMAIN.com with your checker's address. Caddy gets the HTTPS certificate by itself.
+verify.YOUR-CHECK-DOMAIN.com {
+    reverse_proxy 127.0.0.1:8090
+}

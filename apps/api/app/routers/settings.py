@@ -183,6 +183,7 @@ def update_settings(
 class VerifierTestIn(BaseModel):
     provider: str = ""
     key: str = ""  # empty: the saved key
+    url: str = ""  # own checker; empty: the saved address
 
 
 @router.post("/email-verifier/test")
@@ -201,7 +202,8 @@ def test_email_verifier(
     if not key:
         raise HTTPException(status_code=400, detail="Paste the API key first.")
     try:
-        return {"message": account_status(provider, key)}
+        url = data.url.strip() or (settings.email_verifier_url if settings else "")
+        return {"message": account_status(provider, key, url)}
     except VerifierError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
