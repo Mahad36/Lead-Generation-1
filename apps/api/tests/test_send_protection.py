@@ -300,7 +300,8 @@ def test_spacing_counts_emails_still_being_sent(db):
 def campaign_with_lead(db, user, account, rotate=False):
     from app.models import Campaign, CampaignLead, Lead
 
-    lead = Lead(user_id=user.id, business_name="Acme Dental", primary_email="owner@acme-dental.com")
+    lead = Lead(user_id=user.id, business_name="Acme Dental", primary_email="info@acme-dental.com",
+                website_url="https://acme-dental.com")
     db.add(lead)
     db.flush()
     campaign = Campaign(user_id=user.id, name="Test", email_account_id=account.id, status="running",
@@ -714,15 +715,19 @@ def test_monthly_limit_and_used_up_allowance_never_stop_outreach(db, verifier):
         verification_problem(db, user.id, lead_for(db, user, f"x{i}@other{i}.com", f"https://site{i}.com"), f"x{i}@other{i}.com")
     assert len(calls) == 3
     # limit of 3 reached: an ordinary address goes out unchecked; another company's address is skipped (unconfirmed)
-    assert verification_problem(db, user.id, lead_for(db, user, "admin@site.com", "https://site.com"), "admin@site.com") == ""
-    assert "couldn't be confirmed" in verification_problem(
-        db, user.id, lead_for(db, user, "y@other.com", "https://site.com"), "y@other.com")
+    assert verification_problem(db, user.id, lead_for(db, user, "info@site.com", "https://site.com"), "info@site.com") == ""
+    # a risky type (admin@) is blocked when it can't be confirmed
+    assert verification_problem(db, user.id, lead_for(db, user, "admin@site.com", "https://site.com"), "admin@site.com").startswith("Blocked")
+    assert verification_problem(
+        db, user.id, lead_for(db, user, "y@other.com", "https://site.com"), "y@other.com").startswith("Blocked")
     assert len(calls) == 3
     settings = db.query(UserSettings).filter(UserSettings.user_id == user.id).one()
     settings.email_verifier_monthly_limit, settings.email_verifier_usage = 10, {}
     db.commit()
     answer["raise"] = VerifierError("ZeroBounce: out of credits", quota=True)
-    assert verification_problem(db, user.id, lead_for(db, user, "admin@s.com", "https://s.com"), "admin@s.com") == ""
+    assert verification_problem(db, user.id, lead_for(db, user, "info@s.com", "https://s.com"), "info@s.com") == ""
+    # a risky address reaches the service, which says the credits are gone: marked, and the risky address is blocked
+    assert verification_problem(db, user.id, lead_for(db, user, "z@other.com", "https://s.com"), "z@other.com").startswith("Blocked")
     db.refresh(settings)
     assert settings.email_verifier_usage["exhausted"] is True
 

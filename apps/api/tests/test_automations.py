@@ -251,3 +251,21 @@ def test_bounce_prone_address_rules(monkeypatch):
     assert "mailinator.com" in deliverability.DISPOSABLE_DOMAINS
     monkeypatch.setattr(deliverability, "dns_query", lambda name, rtype: {"Answer": [{"type": 15, "data": "0 mx.sedoparking.com."}]})
     assert deliverability.parked_domain("for-sale-example.com")
+
+
+def test_safe_address_types():
+    from types import SimpleNamespace
+
+    from app.services.contacts import address_risk
+
+    def lead(website, emails=(), city="", address=""):
+        rows = [SimpleNamespace(email=e, email_type="", contact_name=n, job_title=t) for e, n, t in emails]
+        return SimpleNamespace(website_url=website, emails=rows, city=city, address=address)
+
+    site = "https://acme-dental.com"
+    for safe in ("info@acme-dental.com", "office@acme-dental.com", "sales@acme-dental.com", "acmedental@gmail.com"):
+        assert address_risk(lead(site), safe) == "", safe
+    assert address_risk(lead(site, [("sarah@acme-dental.com", "Sarah Lee", "Owner")]), "sarah@acme-dental.com") == ""
+    assert address_risk(lead(site, city="Miami", address="North Miami, FL"), "northmiami@acme-dental.com") == ""
+    for risky in ("adam.cooper@quantum.com", "jane@acme-dental.com", "admin@acme-dental.com", "bob@verizon.net"):
+        assert address_risk(lead(site), risky), risky

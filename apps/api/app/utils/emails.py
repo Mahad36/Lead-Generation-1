@@ -51,6 +51,10 @@ FALSE_POSITIVE_DOMAINS = {
     "mywebsite.com",
     "mycompany.com",
     "examples.com",
+    "businessname.com",
+    "yourbusinessname.com",
+    "yourname.com",
+    "barber.com",
     "sample.com",
     "samplesite.com",
     "yourdomain.co.uk",
@@ -144,8 +148,8 @@ def extract_emails_from_text(text: str) -> list[str]:
 
 def is_plausible_email(email: str) -> bool:
     value = (email or "").strip().lower()
-    if value.count("@") != 1:
-        return False
+    if value.count("@") != 1 or any(ch.isspace() for ch in value) or "mailto" in value or ":" in value:
+        return False  # scraped junk ("mailto: x@y.com", an address with a space in it)
     local, domain = value.split("@", 1)
     if not local or not domain or "." not in domain:
         return False

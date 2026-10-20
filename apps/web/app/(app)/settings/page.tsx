@@ -398,6 +398,25 @@ export default function SettingsPage() {
               </p>
             </div>
           </div>
+          <label className="flex items-start gap-2 rounded-lg border border-border p-3 text-sm">
+            <input
+              type="checkbox"
+              className="mt-1"
+              checked={s.safe_addresses_only !== false}
+              onChange={(e) => set("safe_addresses_only", e.target.checked)}
+            />
+            <span>
+              <span className="font-medium">Only email safe address types (recommended)</span>
+              <span className="block text-xs text-muted">
+                Emails go only to: a general inbox on the business&apos;s own domain (info@, office@, hello@), a
+                department (sales@...), a person named on the website, the mailbox for the lead&apos;s own location, or
+                Gmail / Outlook / Yahoo. Riskier types (another company&apos;s domain, addresses that only look like a
+                name, admin@, old internet-provider addresses) are blocked unless the verification service below
+                confirms the mailbox; the app then tries the business&apos;s next safe address. Checked before the
+                audit and again right before each email is sent.
+              </span>
+            </span>
+          </label>
           <EmailVerification s={s} set={set} />
           <div className="rounded-lg border border-border p-3">
             <Label>Delay between emails from the same inbox (minutes, random each time)</Label>

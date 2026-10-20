@@ -48,6 +48,14 @@ FREE_MAIL = {
 GENERIC = {
     "info", "contact", "hello", "hi", "enquiries", "enquiry", "inquiries", "inquiry", "mail", "office", "admin",
     "team", "general", "reception", "studio", "shop", "store", "email", "home", "welcome",
+    # role words (not people), in the languages your leads use: these are shared inboxes, not names
+    "reservations", "reservation", "reserve", "appointments", "appointment", "booking", "bookings", "smile", "smiles",
+    "care", "patientcare", "patients", "post", "frontdesk", "front", "desk", "clinic", "practice", "surgery", "dental",
+    "dentist", "salon", "spa", "events", "event", "catering", "order", "orders", "customercare", "customerservice",
+    "service", "services", "quotes", "quote", "estimates", "estimate", "jobs", "hola", "contacto", "reservas",
+    "kontakt", "hallo", "buero", "praxis", "empfang", "anfrage", "anfragen", "bestellung", "bonjour", "accueil",
+    "office1", "online", "web", "enquire", "ask", "help", "hey", "yo", "staff", "management", "manager", "owner",
+    "dispatch", "csr", "estimating", "scheduling", "schedule", "repairs", "installs", "parts", "rentals", "leasing",
 }
 DEPARTMENT_SCORE = {
     "marketing": 72, "digital": 72, "web": 70, "webmaster": 68, "design": 62, "sales": 66, "partnerships": 64,
@@ -387,6 +395,37 @@ def ranked_contacts(lead: Lead, include_generic: bool = True) -> list[tuple[Lead
         if points > 0:
             rows.append((row, points, reason))
     return sorted(rows, key=lambda r: (-r[1], r[0].email))
+
+
+def address_risk(lead: Lead, email: str) -> str:
+    """Why this address type has a real chance of bouncing ("" = a safe type). Safe types: a general inbox on the
+    business's own domain (info@, office@...), a department inbox, a person named on the website, the mailbox for the
+    lead's own location, Gmail / Outlook / Yahoo. Measured on real sending: another company's domain bounced 17%,
+    addresses that only look like a name 9%, admin@ 33%; info@ 3%, webmail 0%."""
+    from app.services.email_verification import LEGACY_ISP, WEBMAIL, must_confirm
+
+    address = (email or "").strip().lower()
+    local, _, domain = address.partition("@")
+    other = must_confirm(address, getattr(lead, "website_url", "") or "")
+    if other:
+        return f"{other} (these bounced 17% in your sending)"
+    if domain in WEBMAIL:
+        return ""
+    if domain in LEGACY_ISP:
+        return f"{domain} is an old internet-provider address (many were closed or moved)"
+    base = re.split(r"[._+-]", local)[0]
+    if local in ADMIN_INBOXES or base in ADMIN_INBOXES:
+        return f"{local}@ is usually the website / hosting admin's inbox (these bounced 33% in your sending)"
+    row = next((r for r in getattr(lead, "emails", None) or [] if r.email.lower() == address), None)
+    name, title = (row.contact_name, row.job_title) if row is not None else ("", "")
+    kind = (row.email_type if row is not None and row.email_type in ("personal", "department", "generic")
+            else classify(address, name, title))
+    if kind == "personal" and not (name or title):
+        if re.sub(r"[^a-z]", "", local) in location_names(lead):
+            return ""  # the mailbox for this lead's own branch
+        return (f"{local}@ only looks like a person's name, with no name or role shown on the site (these bounced 9% "
+                "in your sending)")
+    return ""
 
 
 def reject_and_fall_back(db: Session, lead: Lead, email: str, status: str = "invalid") -> str | None:

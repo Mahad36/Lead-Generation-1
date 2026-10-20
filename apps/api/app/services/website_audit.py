@@ -1182,8 +1182,19 @@ def send_audit(
     if (not settings or settings.respect_suppression_list) and is_suppressed(db, user_id, recipient):
         raise HTTPException(status_code=400, detail="This address is on your suppression list (unsubscribed).")
 
-    problem = deliverability.address_problem(db, user_id, recipient)
+    from app.services.email_verification import verification_problem
+
+    # Checked again right before sending (the address may have been chosen before today's rules, or by hand):
+    # never send to an address that would bounce or a risky type that isn't confirmed
+    problem = deliverability.address_problem(db, user_id, recipient) or (
+        verification_problem(db, user_id, lead, recipient) if lead else ""
+    )
     if problem:
+        if not manual:
+            audit.auto_send = False  # held for you: choose another address on the lead, then send
+            audit.step = "Not sent: the address may bounce (choose another on the lead)"
+            audit.error_message = problem[:500]
+            db.commit()
         raise HTTPException(status_code=400, detail=problem)
     if not manual:
         # The file's / campaign's own schedule in the lead's time zone, else your sending hours

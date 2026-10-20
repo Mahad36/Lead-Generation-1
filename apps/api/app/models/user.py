@@ -44,6 +44,8 @@ class UserSettings(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     # Account health protection (services/send_protection.py): "strict" holds sending on any credible warning
     # sign; "balanced" only on serious ones (warnings halve capacity instead)
     health_policy: Mapped[str] = mapped_column(String(16), default="strict", server_default="strict", nullable=False)
+    # Only email address types with a low chance of bouncing; riskier types need a verification service's confirmation
+    safe_addresses_only: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true", nullable=False)
     # What the outreach leads with: "automation" (automation first, website as support), "balanced" (website finding
     # plus one automation), "website" (website first)
     outreach_focus: Mapped[str] = mapped_column(String(16), default="balanced", server_default="balanced", nullable=False)

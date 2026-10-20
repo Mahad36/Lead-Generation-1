@@ -190,6 +190,9 @@ def must_confirm(email: str, website: str) -> str:
         return ""
     if domain.split(".")[0] == site.split(".")[0]:
         return ""  # the same name on another ending (.com / .net): the business's own second domain
+    a, b = re.sub(r"[^a-z]", "", domain.split(".")[0]), re.sub(r"[^a-z]", "", site.split(".")[0])
+    if min(len(a), len(b)) >= 6 and (a in b or b in a):
+        return ""  # its own other domain: mybeautybreeze.com / beautybreeze.co.uk, aux-delices-normands.de
     return f"{email} is on a different company's domain than {site}"
 
 
@@ -236,8 +239,13 @@ def verification_problem(db: Session, user_id: str, lead: Lead | None, email: st
     exist). Never blocks for any other reason: no provider, not risky, allowance used up, or an error."""
     if not lead or not email:
         return ""
-    must = must_confirm(email, lead.website_url or "")
     settings = db.query(UserSettings).filter(UserSettings.user_id == user_id).first()
+    if settings is None or getattr(settings, "safe_addresses_only", True):
+        from app.services.contacts import address_risk
+
+        must = address_risk(lead, email)  # every risky address type must be confirmed, or it isn't emailed
+    else:
+        must = must_confirm(email, lead.website_url or "")
     if not settings or settings.email_verifier_provider not in PROVIDERS or not settings.encrypted_email_verifier_key:
         return _unconfirmed(must, "no verification service is set up")
     address = email.strip().lower()
@@ -248,12 +256,12 @@ def verification_problem(db: Session, user_id: str, lead: Lead | None, email: st
     )
     if stored and stored.verification_status in CHECKED:
         status = stored.verification_status
-        if must and status == "unknown":
-            return _unconfirmed(must, "the verification service couldn't tell")
+        if must and status in ("unknown", "accept_all"):
+            return _unconfirmed(must, "the verification service couldn't confirm this mailbox")
         return _problem(status, address, (stored.verification_details or {}).get("detail", ""), settings)
     reason = ""
     if settings.email_verifier_scope != "all":
-        reason = risky_reason(address, lead.website_url or "", lead.category or "", risky_categories(db, user_id))
+        reason = must or risky_reason(address, lead.website_url or "", lead.category or "", risky_categories(db, user_id))
         if not reason:
             return ""
     usage = _usage(settings)
@@ -290,8 +298,9 @@ def verification_problem(db: Session, user_id: str, lead: Lead | None, email: st
         lead.email_verification_status = result["status"]
     db.commit()
     logger.info("email_verified", email=address, status=result["status"], why=reason or "all")
-    if must and result["status"] == "unknown":
-        return _unconfirmed(must, "the verification service couldn't tell")
+    if must and result["status"] in ("unknown", "accept_all"):
+        # accept_all: the domain says yes to every address, so this mailbox isn't actually confirmed
+        return _unconfirmed(must, "the verification service couldn't confirm this mailbox")
     return _problem(result["status"], address, result["detail"], settings)
 
 
@@ -299,7 +308,7 @@ def _unconfirmed(must: str, why: str) -> str:
     """An address that is only used once confirmed, and couldn't be ("" for every other address)."""
     if not must:
         return ""
-    return f"{must} (these bounced 17% in your sending) and couldn't be confirmed ({why}), so it's skipped."
+    return f"Blocked: {must}. It's only emailed once a verification service confirms the mailbox ({why})."
 
 
 def _problem(status: str, email: str, detail: str, settings: UserSettings) -> str:

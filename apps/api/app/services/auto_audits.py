@@ -369,7 +369,8 @@ def checked_recipient(db: Session, user_id: str, lead: Lead, log=None) -> str:
     for _ in range(3):
         if not problem or not lead.emails:
             break
-        next_email = reject_and_fall_back(db, lead, email, "invalid" if "doesn't exist" in problem else "domain_rejects")
+        status = "invalid" if "doesn't exist" in problem else "risky" if problem.startswith("Blocked:") else "domain_rejects"
+        next_email = reject_and_fall_back(db, lead, email, status)
         if not next_email:
             break
         if log:

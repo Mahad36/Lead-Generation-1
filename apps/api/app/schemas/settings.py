@@ -29,6 +29,7 @@ class SettingsOut(BaseModel):
     health_policy: str = "strict"
     automation_offers: str = ""
     outreach_focus: str = "balanced"
+    safe_addresses_only: bool = True
     email_verifier_provider: str = ""
     email_verifier_url: str = ""
     email_verifier_scope: str = "risky"
@@ -93,6 +94,7 @@ class SettingsUpdate(BaseModel):
     health_policy: Literal["strict", "balanced"] | None = None
     automation_offers: str | None = None  # comma-separated automation keys you offer ("" = none)
     outreach_focus: Literal["automation", "balanced", "website"] | None = None
+    safe_addresses_only: bool | None = None
     email_verifier_provider: Literal["", "zerobounce", "hunter", "own"] | None = None
     email_verifier_url: str | None = Field(default=None, max_length=500)
     email_verifier_key: str | None = None  # stored encrypted; never returned
