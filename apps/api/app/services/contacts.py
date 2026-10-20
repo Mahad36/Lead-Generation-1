@@ -55,6 +55,15 @@ DEPARTMENT_SCORE = {
     "booking": 40, "orders": 38, "accounts": 30, "billing": 28, "support": 34, "service": 36, "help": 32,
     "media": 50, "press": 45,
 }
+# Among general inboxes, the ones the front desk actually reads first; admin@ / mail@ often belong to whoever set up
+# the website or hosting and are the likeliest to be dead (equal scores used to be broken alphabetically: admin < info)
+GENERIC_SCORE = {
+    "info": 53, "contact": 53, "hello": 53, "enquiries": 53, "enquiry": 53, "inquiries": 53, "inquiry": 53,
+    "office": 52, "reception": 52, "team": 51, "general": 51, "studio": 51, "shop": 51, "store": 51, "hi": 51,
+    "welcome": 50, "mail": 46, "email": 46, "home": 45, "admin": 42,
+}
+LOCATION_SCORE = 62  # the mailbox for the lead's own branch (e.g. northmiami@ for the North Miami office)
+
 EXCLUDED_LOCAL = {
     "noreply", "no-reply", "donotreply", "privacy", "legal", "abuse", "postmaster", "unsubscribe", "jobs", "careers",
     "hr", "recruitment", "dmca", "gdpr", "dataprotection", "datenschutz",
@@ -123,7 +132,22 @@ def score(email: str, email_type: str, title: str = "", name: str = "") -> tuple
         if t:
             return 58, f"{who}: named contact (role not a decision-maker)"
         return 55, f"personal-looking address{f' ({name})' if name else ''}, role not stated"
-    return 50, f"{local}@ general business inbox"
+    base = re.split(r"[._+-]", local)[0]
+    points = GENERIC_SCORE.get(local, GENERIC_SCORE.get(base, 50))
+    return points, f"{local}@ general business inbox" + (" (often the website / hosting admin)" if points < 47 else "")
+
+
+def location_names(lead: Lead) -> dict[str, str]:
+    """Squashed place names from the lead's city and address ("northmiami" -> "North Miami"), for branch mailboxes."""
+    words = re.findall(r"[A-Za-z]+", f"{getattr(lead, 'city', '') or ''} {getattr(lead, 'address', '') or ''}")
+    names = {}
+    for size in (1, 2, 3):
+        for i in range(len(words) - size + 1):
+            phrase = words[i:i + size]
+            key = "".join(w.lower() for w in phrase)
+            if len(key) >= 5 and not any(ch.isdigit() for ch in key):
+                names.setdefault(key, " ".join(phrase))
+    return names
 
 
 # ---------------------------------------------------------------- discovery
@@ -288,6 +312,8 @@ def refresh_verification(db: Session, lead: Lead) -> None:
             continue
         if row.verification_status in ("bounced", "suppressed"):
             continue
+        if row.verification_status in PROVIDER_STATUSES and (getattr(row, "verification_details", None) or {}).get("provider"):
+            continue  # a verification service's answer is better than the domain check: keep it
         accepts = domain_accepts_mail(address)
         row.verification_status = "domain_ok" if accepts else "domain_rejects" if accepts is False else "published"
         row.is_verified = False  # only bounces / replies can prove a mailbox; never claimed here
@@ -295,11 +321,13 @@ def refresh_verification(db: Session, lead: Lead) -> None:
 
 # ---------------------------------------------------------------- choosing recipients
 
-ELIGIBLE = {"domain_ok", "published", "not_checked", "valid"}
+ELIGIBLE = {"domain_ok", "published", "not_checked", "valid", "accept_all", "unknown"}
+PROVIDER_STATUSES = {"valid", "invalid", "accept_all", "unknown"}  # set by a verification service: kept as they are
 
 
 def ranked_contacts(lead: Lead, include_generic: bool = True) -> list[tuple[LeadEmail, int, str]]:
     rows = []
+    places = location_names(lead)
     for row in lead.emails:
         if row.verification_status not in ELIGIBLE:
             continue
@@ -309,6 +337,9 @@ def ranked_contacts(lead: Lead, include_generic: bool = True) -> list[tuple[Lead
         if kind == "generic" and not include_generic:
             continue
         points, reason = score(row.email, kind, row.job_title, row.contact_name)
+        local = re.sub(r"[^a-z]", "", row.email.split("@", 1)[0].lower())
+        if points > 0 and local in places and points < LOCATION_SCORE:
+            points, reason = LOCATION_SCORE, f"{row.email.split('@', 1)[0]}@ is the mailbox for this location ({places[local]})"
         if points > 0:
             rows.append((row, points, reason))
     return sorted(rows, key=lambda r: (-r[1], r[0].email))

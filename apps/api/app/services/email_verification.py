@@ -34,7 +34,9 @@ logger = get_logger("email_verify")
 
 PROVIDERS = {"zerobounce": "ZeroBounce", "hunter": "Hunter", "own": "Your mailbox checker"}
 CHECKED = {"valid", "invalid", "accept_all", "unknown"}
-RISKY_BOUNCE_RATE, RISKY_MIN_SENT = 0.05, 10
+RISKY_BOUNCE_RATE, RISKY_MIN_SENT = 0.03, 10  # 3%: steady, not flipping around 5% from one email to the next
+DELIVERABLE_DO_NOT_MAIL = {"role_based": "valid", "role_based_catch_all": "accept_all", "mx_forward": "valid"}
+ADMIN_LIKE = {"admin", "administrator", "mail", "email", "webmaster", "web", "hosting", "it", "tech"}
 TIMEOUT = 20
 
 
@@ -71,11 +73,15 @@ def verify_with(provider: str, key: str, email: str, url: str = "") -> dict:
         if response.status_code >= 400 or data.get("error"):
             message = str(data.get("error") or f"HTTP {response.status_code}")
             raise VerifierError(f"ZeroBounce: {message}", quota="credit" in message.lower() or response.status_code in (402, 429))
-        status = str(data.get("status") or "").lower()
+        status, sub = str(data.get("status") or "").lower(), str(data.get("sub_status") or "").lower()
         mapped = {
             "valid": "valid", "invalid": "invalid", "spamtrap": "invalid", "abuse": "invalid", "do_not_mail": "invalid",
             "catch-all": "accept_all",
         }.get(status, "unknown")
+        if status == "do_not_mail" and sub in DELIVERABLE_DO_NOT_MAIL:
+            # ZeroBounce's "do not mail" for marketing lists also covers shared inboxes (info@, office@): they exist,
+            # and for a small business they're usually the right address
+            mapped = DELIVERABLE_DO_NOT_MAIL[sub]
         return {"status": mapped, "detail": " / ".join(x for x in (status, data.get("sub_status")) if x), "raw": data}
     if provider == "hunter":
         response = httpx.get(
@@ -163,6 +169,9 @@ def risky_reason(email: str, website: str, category: str, risky: dict[str, float
     domain, site = (email or "").rsplit("@", 1)[-1].lower(), site_domain(website)
     if site and domain != site and not domain.endswith("." + site) and not site.endswith("." + domain):
         return "the address isn't on the website's own domain"
+    local = (email or "").split("@", 1)[0].lower()
+    if local in ADMIN_LIKE or re.split(r"[._+-]", local)[0] in ADMIN_LIKE:
+        return f"{local}@ is often the website / hosting admin's inbox, and often dead"
     rate = risky.get((category or "").lower())
     if rate is not None:
         return f"{category} leads have bounced {rate:.0%} in your sending"

@@ -143,3 +143,39 @@ def test_email_rules_ask_for_one_strong_automation_line():
 
     assert "ONE strong line" in EMAIL_SYSTEM and "single sentence" in EMAIL_SYSTEM
     assert '"AI" is fine' in EMAIL_SYSTEM and "never a list" in EMAIL_SYSTEM
+
+
+def test_address_choice_prefers_info_and_the_leads_own_branch():
+    from types import SimpleNamespace
+
+    from app.services.contacts import ranked_contacts
+
+    def row(email):
+        return SimpleNamespace(email=email, verification_status="domain_ok", email_type="", contact_name="", job_title="",
+                               verification_details={})
+
+    lead = SimpleNamespace(city="Miami, Florida", address="", emails=[row("admin@miamibeachds.com"), row("info@miamibeachds.com")])
+    assert ranked_contacts(lead)[0][0].email == "info@miamibeachds.com"  # was admin@ (alphabetical tie)
+    sher = SimpleNamespace(city="Miami, Florida", address="12000 Biscayne Blvd #130, North Miami, FL 33181",
+                           emails=[row(e) for e in ("adventura@sherdental.com", "aventura@sherdental.com",
+                                                    "northmiami@sherdental.com", "fortlauderdale@sherdental.com")])
+    best = ranked_contacts(sher)[0]
+    assert best[0].email == "northmiami@sherdental.com" and "North Miami" in best[2]
+
+
+def test_zerobounce_role_based_is_not_a_dead_mailbox(monkeypatch):
+    from app.services import email_verification as ev
+
+    class Response:
+        status_code, content = 200, b"x"
+
+        def __init__(self, data):
+            self._data = data
+
+        def json(self):
+            return self._data
+
+    for sub, expected in (("role_based", "valid"), ("role_based_catch_all", "accept_all"), ("disposable", "invalid")):
+        monkeypatch.setattr(ev.httpx, "get", lambda *a, **k: Response({"status": "do_not_mail", "sub_status": sub}))
+        assert ev.verify_with("zerobounce", "k", "info@x.com")["status"] == expected, sub
+    assert ev.risky_reason("admin@acme.com", "https://acme.com", "Dentist", {})  # admin@ is always checked
