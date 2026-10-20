@@ -1164,13 +1164,14 @@ def advance_audit_campaign(db: Session, campaign: Campaign) -> tuple[str, int | 
         reason = "suppressed"
     elif campaign.skip_previously_contacted and lead.last_contacted_at:
         reason = "previously_contacted"
-    elif address_problem(db, campaign.user_id, lead.primary_email):
-        reason = "email_domain_rejects_mail"
     else:
-        from app.services.email_verification import verification_problem
+        # Best address by today's rules, free checks and verification (falls back to the business's next-best
+        # address), all before the audit, so no Claude tokens are spent on an address that would bounce
+        from app.services.auto_audits import checked_recipient
 
-        if verification_problem(db, campaign.user_id, lead, lead.primary_email):
-            reason = "mailbox_does_not_exist"  # checked before the audit, so no Claude tokens are spent on it
+        problem = checked_recipient(db, campaign.user_id, lead)
+        if problem:
+            reason = "mailbox_does_not_exist" if "doesn't exist" in problem else "email_domain_rejects_mail"
     if reason:
         claimed.status = "unsubscribed" if reason == "suppressed" else "skipped"
         claimed.skip_reason, claimed.locked_at, claimed.locked_by = reason, None, ""

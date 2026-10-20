@@ -343,6 +343,42 @@ def _running_audits(db: Session, user_id: str) -> int:
     return db.query(WebsiteAudit).filter(WebsiteAudit.user_id == user_id, WebsiteAudit.status.in_(ACTIVE_STATUSES)).count()
 
 
+def checked_recipient(db: Session, user_id: str, lead: Lead, log=None) -> str:
+    """Pick and check the lead's recipient; "" when it's good to go, else why not (no usable address left)."""
+    from app.services.contacts import choose_primary, ranked_contacts, reject_and_fall_back
+
+    # Keep the current address unless today's rules rule it out (a website admin's inbox, a likely typo): only then
+    # choose the next-best one. (Re-ranking every lead would also swap good info@ addresses for odd ones.)
+    if lead.emails and lead.primary_email:
+        usable = {row.email.lower() for row, _, _ in ranked_contacts(lead)}
+        if lead.primary_email.lower() not in usable:
+            if not usable:
+                # Only ruled-out addresses (e.g. admin@): one chance, if the verification service confirms it works
+                from app.services.contacts import _confirmed
+
+                verification_problem(db, user_id, lead, lead.primary_email)
+                row = next((r for r in lead.emails if r.email.lower() == lead.primary_email.lower()), None)
+                if row is None or not _confirmed(row):
+                    return (f"{lead.primary_email} is the website admin's inbox or a likely typo, and no other address "
+                            "was found (skipped unless the verification service confirms it).")
+            else:
+                choose_primary(db, lead)
+                db.commit()
+    email = lead.primary_email or ""
+    problem = address_problem(db, user_id, email) or verification_problem(db, user_id, lead, email)
+    for _ in range(3):
+        if not problem or not lead.emails:
+            break
+        next_email = reject_and_fall_back(db, lead, email, "invalid" if "doesn't exist" in problem else "domain_rejects")
+        if not next_email:
+            break
+        if log:
+            log.info("recipient_fallback", lead_id=lead.id, rejected=email, now=next_email, why=problem[:120])
+        email = next_email
+        problem = address_problem(db, user_id, email) or verification_problem(db, user_id, lead, email)
+    return problem
+
+
 def _note_hold(db: Session, job: ScrapingJob, reason: str) -> None:
     """Why this file's audits are paused right now (shown on the file); cleared when they can run again."""
     if (job.extra or {}).get("audit_hold", "") == reason:
@@ -386,10 +422,10 @@ def poll_job(db: Session, job: ScrapingJob) -> int:
         return 0
     started = 0
     for lead in candidate_leads_query(db, job.user_id, job.id).limit(room).all():
-        # Free checks first, then (if set up) the verification provider for risky leads: before any Claude tokens
-        problem = address_problem(db, job.user_id, lead.primary_email) or verification_problem(
-            db, job.user_id, lead, lead.primary_email
-        )
+        # The best address by today's rules (skips admin@ inboxes and likely typos), then the free checks and (if
+        # set up) the verification service, all before any Claude tokens. A rejected address falls back to the
+        # business's next-best one instead of dropping the lead.
+        problem = checked_recipient(db, job.user_id, lead, log)
         if problem:
             # Don't spend an audit on an email that would bounce
             lead.email_status = "undeliverable"

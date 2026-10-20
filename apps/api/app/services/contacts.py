@@ -63,6 +63,23 @@ GENERIC_SCORE = {
     "welcome": 50, "mail": 46, "email": 46, "home": 45, "admin": 42,
 }
 LOCATION_SCORE = 62  # the mailbox for the lead's own branch (e.g. northmiami@ for the North Miami office)
+# Never emailed (unless a verification service confirmed the mailbox): the website / hosting admin's inbox
+ADMIN_INBOXES = {"admin", "administrator", "webmaster", "hostmaster", "hosting", "it", "tech", "sysadmin", "wordpress",
+                 "wp", "web", "dev", "developer"}
+
+
+def _one_typo_apart(a: str, b: str) -> bool:
+    """Two different addresses one letter apart (adventura / aventura): one of them is probably a typo."""
+    if a == b or min(len(a), len(b)) < 5 or abs(len(a) - len(b)) > 1:
+        return False
+    if len(a) == len(b):
+        return sum(x != y for x, y in zip(a, b)) == 1
+    short, long_ = (a, b) if len(a) < len(b) else (b, a)
+    return any(long_[:i] + long_[i + 1:] == short for i in range(len(long_)))
+
+
+def _confirmed(row) -> bool:
+    return row.verification_status == "valid" and bool((getattr(row, "verification_details", None) or {}).get("provider"))
 
 EXCLUDED_LOCAL = {
     "noreply", "no-reply", "donotreply", "privacy", "legal", "abuse", "postmaster", "unsubscribe", "jobs", "careers",
@@ -328,9 +345,20 @@ PROVIDER_STATUSES = {"valid", "invalid", "accept_all", "unknown"}  # set by a ve
 def ranked_contacts(lead: Lead, include_generic: bool = True) -> list[tuple[LeadEmail, int, str]]:
     rows = []
     places = location_names(lead)
+    locals_by_domain: dict[str, list[str]] = {}
+    for row in lead.emails:
+        local_part, _, dom = row.email.lower().partition("@")
+        locals_by_domain.setdefault(dom, []).append(re.sub(r"[^a-z]", "", local_part))
     for row in lead.emails:
         if row.verification_status not in ELIGIBLE:
             continue
+        local_part, _, dom = row.email.lower().partition("@")
+        squashed = re.sub(r"[^a-z]", "", local_part)
+        if not _confirmed(row):
+            if local_part in ADMIN_INBOXES or re.split(r"[._+-]", local_part)[0] in ADMIN_INBOXES:
+                continue  # the website / hosting admin's inbox: often dead, never the right person
+            if squashed not in places and any(_one_typo_apart(squashed, o) for o in locals_by_domain.get(dom, [])):
+                continue  # one of two near-identical addresses (a likely typo on their site): use another one
         kind = row.email_type if row.email_type in ("personal", "department", "generic") else classify(
             row.email, row.contact_name, row.job_title
         )
@@ -343,6 +371,18 @@ def ranked_contacts(lead: Lead, include_generic: bool = True) -> list[tuple[Lead
         if points > 0:
             rows.append((row, points, reason))
     return sorted(rows, key=lambda r: (-r[1], r[0].email))
+
+
+def reject_and_fall_back(db: Session, lead: Lead, email: str, status: str = "invalid") -> str | None:
+    """This address won't do (it would bounce): mark it, and choose the business's next-best address.
+    Returns the new primary address, or None when there is no other."""
+    address = (email or "").strip().lower()
+    for row in lead.emails:
+        if row.email.lower() == address:
+            row.verification_status = status
+    chosen = choose_primary(db, lead)
+    db.commit()
+    return lead.primary_email if chosen is not None and lead.primary_email.lower() != address else None
 
 
 def choose_primary(db: Session, lead: Lead) -> LeadEmail | None:

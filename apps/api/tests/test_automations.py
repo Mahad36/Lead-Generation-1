@@ -179,3 +179,61 @@ def test_zerobounce_role_based_is_not_a_dead_mailbox(monkeypatch):
         monkeypatch.setattr(ev.httpx, "get", lambda *a, **k: Response({"status": "do_not_mail", "sub_status": sub}))
         assert ev.verify_with("zerobounce", "k", "info@x.com")["status"] == expected, sub
     assert ev.risky_reason("admin@acme.com", "https://acme.com", "Dentist", {})  # admin@ is always checked
+
+
+def test_admin_inboxes_and_likely_typos_are_skipped():
+    from types import SimpleNamespace
+
+    from app.services.contacts import ranked_contacts
+
+    def row(email, status="domain_ok", provider=None):
+        return SimpleNamespace(email=email, verification_status=status, email_type="", contact_name="", job_title="",
+                               verification_details={"provider": provider} if provider else {})
+
+    lead = SimpleNamespace(city="", address="", emails=[row("admin@acme.com"), row("webmaster@acme.com")])
+    assert ranked_contacts(lead) == []  # never the website admin's inbox
+    lead.emails.append(row("admin@acme.com".replace("admin", "info")))
+    assert [r[0].email for r in ranked_contacts(lead)] == ["info@acme.com"]
+    confirmed = SimpleNamespace(city="", address="", emails=[row("admin@acme.com", "valid", "zerobounce")])
+    assert ranked_contacts(confirmed)[0][0].email == "admin@acme.com"  # unless verified as working
+    twins = SimpleNamespace(city="Miami", address="", emails=[row("adventura@sher.com"), row("aventura@sher.com"),
+                                                              row("info@sher.com")])
+    assert [r[0].email for r in ranked_contacts(twins)] == ["info@sher.com"]
+
+
+def test_a_rejected_address_falls_back_to_the_next_one(monkeypatch):
+    from types import SimpleNamespace
+
+    from app.services import auto_audits
+
+    rows = [SimpleNamespace(email=e, verification_status="domain_ok", email_type="", contact_name="", job_title="",
+                            verification_details={}, is_primary=False, rank_reason="")
+            for e in ("info@dead.com", "office@dead.com")]
+    lead = SimpleNamespace(id="l1", city="", address="", emails=rows, primary_email="info@dead.com", extra={})
+    db = SimpleNamespace(commit=lambda: None)
+    monkeypatch.setattr(auto_audits, "address_problem", lambda db, user, email: "")
+    monkeypatch.setattr(auto_audits, "verification_problem",
+                        lambda db, user, lead, email: "ZeroBounce says the mailbox doesn't exist" if email == "info@dead.com" else "")
+    assert auto_audits.checked_recipient(db, "u", lead) == ""
+    assert lead.primary_email == "office@dead.com" and rows[0].verification_status == "invalid"
+
+
+def test_admin_only_lead_needs_a_confirmed_mailbox(monkeypatch):
+    from types import SimpleNamespace
+
+    from app.services import auto_audits
+
+    row = SimpleNamespace(email="admin@acme.com", verification_status="domain_ok", email_type="", contact_name="",
+                          job_title="", verification_details={}, is_primary=True, rank_reason="")
+    lead = SimpleNamespace(id="l1", city="", address="", emails=[row], primary_email="admin@acme.com", extra={})
+    db = SimpleNamespace(commit=lambda: None)
+    monkeypatch.setattr(auto_audits, "address_problem", lambda *a: "")
+    monkeypatch.setattr(auto_audits, "verification_problem", lambda *a: "")  # verification off: nothing confirmed
+    assert "admin" in auto_audits.checked_recipient(db, "u", lead)
+
+    def confirm(db, user, lead, email):
+        row.verification_status, row.verification_details = "valid", {"provider": "zerobounce"}
+        return ""
+
+    monkeypatch.setattr(auto_audits, "verification_problem", confirm)
+    assert auto_audits.checked_recipient(db, "u", lead) == ""
