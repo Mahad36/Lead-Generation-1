@@ -42,7 +42,8 @@ def test_classify_and_score():
     sales = score("sales@x.com", "department")[0]
     generic = score("info@x.com", "generic")[0]
     unknown_person = score("jane@x.com", "personal")[0]
-    assert owner > marketing > sales > unknown_person > generic > 0
+    # an address that only looks like a name now ranks below info@ (it bounced 3x more in real sending)
+    assert owner > marketing > sales > generic > unknown_person > 0
     # a personal-looking address with no stated role is not ranked above a named decision-maker or department
     assert unknown_person < sales
 

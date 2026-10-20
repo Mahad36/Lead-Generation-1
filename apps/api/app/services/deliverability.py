@@ -490,7 +490,28 @@ def address_problem(db: Session, user_id: str, email: str) -> str:
                 "company's address), so it would bounce or reach the wrong people.")
     if domain_accepts_mail(email) is False:
         return f"The email domain of {email} doesn't accept mail (no mail server), so it would bounce."
+    domain = email.rsplit("@", 1)[-1].strip().lower()
+    if domain in DISPOSABLE_DOMAINS:
+        return f"{email} is a throwaway email address, not a business inbox."
+    if parked_domain(domain):
+        return f"{domain} is a parked or for-sale domain: nobody reads its mail."
     return ""
+
+
+DISPOSABLE_DOMAINS = {
+    "mailinator.com", "guerrillamail.com", "guerrillamail.net", "sharklasers.com", "10minutemail.com", "yopmail.com",
+    "trashmail.com", "getnada.com", "dispostable.com", "maildrop.cc", "temp-mail.org", "tempmail.com", "throwawaymail.com",
+    "mailnesia.com", "fakeinbox.com", "spamgourmet.com", "mintemail.com", "emailondeck.com", "mohmal.com",
+}
+PARKING_MX = ("sedoparking", "parkingcrew", "bodis.com", "above.com", "parklogic", "uniregistry", "dan.com",
+              "afternic", "park-mx", "parked")
+
+
+def parked_domain(domain: str) -> bool:
+    """The domain's mail goes to a domain-parking / marketplace service (the domain is parked or for sale)."""
+    answer = dns_query(domain, "MX") or {}
+    hosts = " ".join(str(r.get("data", "")).lower() for r in answer.get("Answer") or [] if r.get("type") == 15)
+    return bool(hosts) and any(p in hosts for p in PARKING_MX)
 
 
 

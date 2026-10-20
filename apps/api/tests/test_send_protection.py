@@ -684,7 +684,7 @@ def test_off_domain_address_is_checked_once_and_blocked_when_dead(db, verifier):
     assert "doesn't exist" in problem and calls == ["info@lpdentalcosmetic.com"]
     assert db.get(Lead, lead.id).email_verification_status == "invalid"
     stored = db.query(LeadEmail).filter(LeadEmail.lead_id == lead.id).one()
-    assert stored.verification_details["why_checked"] == "the address isn't on the website's own domain"
+    assert "different company's domain" in stored.verification_details["why_checked"]
     assert verification_problem(db, user.id, lead, lead.primary_email) and len(calls) == 1  # cached, no new check
 
 
@@ -713,13 +713,16 @@ def test_monthly_limit_and_used_up_allowance_never_stop_outreach(db, verifier):
     for i in range(3):
         verification_problem(db, user.id, lead_for(db, user, f"x{i}@other{i}.com", f"https://site{i}.com"), f"x{i}@other{i}.com")
     assert len(calls) == 3
-    assert verification_problem(db, user.id, lead_for(db, user, "y@other.com", "https://site.com"), "y@other.com") == ""
-    assert len(calls) == 3  # limit of 3 reached: not checked, and not blocked
+    # limit of 3 reached: an ordinary address goes out unchecked; another company's address is skipped (unconfirmed)
+    assert verification_problem(db, user.id, lead_for(db, user, "admin@site.com", "https://site.com"), "admin@site.com") == ""
+    assert "couldn't be confirmed" in verification_problem(
+        db, user.id, lead_for(db, user, "y@other.com", "https://site.com"), "y@other.com")
+    assert len(calls) == 3
     settings = db.query(UserSettings).filter(UserSettings.user_id == user.id).one()
     settings.email_verifier_monthly_limit, settings.email_verifier_usage = 10, {}
     db.commit()
     answer["raise"] = VerifierError("ZeroBounce: out of credits", quota=True)
-    assert verification_problem(db, user.id, lead_for(db, user, "z@other.com", "https://s.com"), "z@other.com") == ""
+    assert verification_problem(db, user.id, lead_for(db, user, "admin@s.com", "https://s.com"), "admin@s.com") == ""
     db.refresh(settings)
     assert settings.email_verifier_usage["exhausted"] is True
 

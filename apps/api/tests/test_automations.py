@@ -237,3 +237,17 @@ def test_admin_only_lead_needs_a_confirmed_mailbox(monkeypatch):
 
     monkeypatch.setattr(auto_audits, "verification_problem", confirm)
     assert auto_audits.checked_recipient(db, "u", lead) == ""
+
+
+def test_bounce_prone_address_rules(monkeypatch):
+    from app.services import deliverability
+    from app.services.email_verification import must_confirm, risky_reason
+
+    assert must_confirm("adam.cooper@quantum.com", "https://miamihomequeen.com")  # another company's domain
+    assert not must_confirm("owner@gmail.com", "https://acme.com")  # webmail the business publishes
+    assert not must_confirm("info@acme.net", "https://acme.com")  # its own second domain
+    assert not risky_reason("owner@gmail.com", "https://acme.com", "Dentist", {})  # no check spent on webmail
+    assert "old internet-provider" in risky_reason("bob@verizon.net", "https://acme.com", "", {})
+    assert "mailinator.com" in deliverability.DISPOSABLE_DOMAINS
+    monkeypatch.setattr(deliverability, "dns_query", lambda name, rtype: {"Answer": [{"type": 15, "data": "0 mx.sedoparking.com."}]})
+    assert deliverability.parked_domain("for-sale-example.com")

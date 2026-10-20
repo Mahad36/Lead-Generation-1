@@ -164,11 +164,45 @@ def risky_categories(db: Session, user_id: str) -> dict[str, float]:
     return {c: b / s for c, s, b in rows if c and s >= RISKY_MIN_SENT and b / s >= RISKY_BOUNCE_RATE}
 
 
+WEBMAIL = {
+    "gmail.com", "googlemail.com", "outlook.com", "hotmail.com", "live.com", "msn.com", "yahoo.com", "yahoo.co.uk",
+    "icloud.com", "me.com", "hotmail.co.uk", "outlook.co.uk", "ymail.com", "protonmail.com", "proton.me", "gmx.de",
+    "web.de", "gmx.com", "zoho.com",
+}
+# Old internet-provider addresses (many accounts were closed or moved): checked when possible
+LEGACY_ISP = {
+    "verizon.net", "aol.com", "att.net", "sbcglobal.net", "bellsouth.net", "comcast.net", "cox.net", "charter.net",
+    "earthlink.net", "juno.com", "netzero.net", "netzero.com", "rr.com", "roadrunner.com", "frontier.com",
+    "windstream.net", "centurylink.net", "embarqmail.com", "mindspring.com", "prodigy.net", "optonline.net",
+    "btinternet.com", "talktalk.net", "ntlworld.com", "virginmedia.com", "blueyonder.co.uk", "shaw.ca", "sympatico.ca",
+    "bigpond.com", "optusnet.com.au",
+}
+
+
+def must_confirm(email: str, website: str) -> str:
+    """Addresses that are only used when a verification service confirms them (else skipped): another company's
+    domain (in your sending they bounced 17%: templates, the web agency, the parent company...). Gmail / Outlook /
+    Yahoo addresses the business publishes are fine (0% bounces)."""
+    domain, site = (email or "").rsplit("@", 1)[-1].lower(), site_domain(website)
+    if not site or domain in WEBMAIL or domain in LEGACY_ISP:
+        return ""
+    if domain == site or domain.endswith("." + site) or site.endswith("." + domain):
+        return ""
+    if domain.split(".")[0] == site.split(".")[0]:
+        return ""  # the same name on another ending (.com / .net): the business's own second domain
+    return f"{email} is on a different company's domain than {site}"
+
+
 def risky_reason(email: str, website: str, category: str, risky: dict[str, float]) -> str:
     """Why this lead is more likely to bounce ("" = not especially)."""
-    domain, site = (email or "").rsplit("@", 1)[-1].lower(), site_domain(website)
-    if site and domain != site and not domain.endswith("." + site) and not site.endswith("." + domain):
-        return "the address isn't on the website's own domain"
+    domain = (email or "").rsplit("@", 1)[-1].lower()
+    other = must_confirm(email, website)
+    if other:
+        return other
+    if domain in WEBMAIL:
+        return ""  # never bounced in your sending: no check spent on it
+    if domain in LEGACY_ISP:
+        return f"{domain} is an old internet-provider address (many were closed or moved)"
     local = (email or "").split("@", 1)[0].lower()
     if local in ADMIN_LIKE or re.split(r"[._+-]", local)[0] in ADMIN_LIKE:
         return f"{local}@ is often the website / hosting admin's inbox, and often dead"
@@ -202,9 +236,10 @@ def verification_problem(db: Session, user_id: str, lead: Lead | None, email: st
     exist). Never blocks for any other reason: no provider, not risky, allowance used up, or an error."""
     if not lead or not email:
         return ""
+    must = must_confirm(email, lead.website_url or "")
     settings = db.query(UserSettings).filter(UserSettings.user_id == user_id).first()
     if not settings or settings.email_verifier_provider not in PROVIDERS or not settings.encrypted_email_verifier_key:
-        return ""
+        return _unconfirmed(must, "no verification service is set up")
     address = email.strip().lower()
     stored = (
         db.query(LeadEmail)
@@ -212,7 +247,10 @@ def verification_problem(db: Session, user_id: str, lead: Lead | None, email: st
         .first()
     )
     if stored and stored.verification_status in CHECKED:
-        return _problem(stored.verification_status, address, (stored.verification_details or {}).get("detail", ""), settings)
+        status = stored.verification_status
+        if must and status == "unknown":
+            return _unconfirmed(must, "the verification service couldn't tell")
+        return _problem(status, address, (stored.verification_details or {}).get("detail", ""), settings)
     reason = ""
     if settings.email_verifier_scope != "all":
         reason = risky_reason(address, lead.website_url or "", lead.category or "", risky_categories(db, user_id))
@@ -221,7 +259,7 @@ def verification_problem(db: Session, user_id: str, lead: Lead | None, email: st
     usage = _usage(settings)
     own = settings.email_verifier_provider == "own"  # your own checker: no allowance to stay within
     if not own and (usage.get("exhausted") or usage.get("used", 0) >= (settings.email_verifier_monthly_limit or 0)):
-        return ""  # allowance used up this month: carry on as before
+        return _unconfirmed(must, "this month's verification checks are used up")  # others carry on as before
     try:
         key = decrypt_text(settings.encrypted_email_verifier_key)
         result = verify_with(settings.email_verifier_provider, key, address, settings.email_verifier_url or "")
@@ -231,10 +269,10 @@ def verification_problem(db: Session, user_id: str, lead: Lead | None, email: st
             usage["exhausted"] = True
             _save_usage(db, settings, usage)
             db.commit()
-        return ""
-    except Exception as exc:  # network trouble: never block outreach on it
+        return _unconfirmed(must, "the verification service didn't answer")
+    except Exception as exc:  # network trouble: never block an ordinary address on it
         logger.warning("email_verify_error", provider=settings.email_verifier_provider, error=str(exc)[:200])
-        return ""
+        return _unconfirmed(must, "the verification service didn't answer")
     usage["used"] = usage.get("used", 0) + 1
     _save_usage(db, settings, usage)
     details = {
@@ -252,7 +290,16 @@ def verification_problem(db: Session, user_id: str, lead: Lead | None, email: st
         lead.email_verification_status = result["status"]
     db.commit()
     logger.info("email_verified", email=address, status=result["status"], why=reason or "all")
+    if must and result["status"] == "unknown":
+        return _unconfirmed(must, "the verification service couldn't tell")
     return _problem(result["status"], address, result["detail"], settings)
+
+
+def _unconfirmed(must: str, why: str) -> str:
+    """An address that is only used once confirmed, and couldn't be ("" for every other address)."""
+    if not must:
+        return ""
+    return f"{must} (these bounced 17% in your sending) and couldn't be confirmed ({why}), so it's skipped."
 
 
 def _problem(status: str, email: str, detail: str, settings: UserSettings) -> str:

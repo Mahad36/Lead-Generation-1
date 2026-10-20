@@ -148,7 +148,11 @@ def score(email: str, email_type: str, title: str = "", name: str = "") -> tuple
     if email_type == "personal":
         if t:
             return 58, f"{who}: named contact (role not a decision-maker)"
-        return 55, f"personal-looking address{f' ({name})' if name else ''}, role not stated"
+        if name:
+            return 55, f"personal-looking address ({name}), role not stated"
+        # Only looks like a name (john@, northmiami@): in your sending these bounced 3x more than info@ and were opened
+        # less, so info@ / office@ / hello@ come first when the business has one
+        return 50, "personal-looking address, no name or role shown next to it"
     base = re.split(r"[._+-]", local)[0]
     points = GENERIC_SCORE.get(local, GENERIC_SCORE.get(base, 50))
     return points, f"{local}@ general business inbox" + (" (often the website / hosting admin)" if points < 47 else "")
@@ -354,6 +358,10 @@ def ranked_contacts(lead: Lead, include_generic: bool = True) -> list[tuple[Lead
             continue
         local_part, _, dom = row.email.lower().partition("@")
         squashed = re.sub(r"[^a-z]", "", local_part)
+        from app.utils.emails import is_plausible_email
+
+        if not is_plausible_email(row.email):
+            continue  # an image file name, a template placeholder, a website vendor's address
         if not _confirmed(row):
             if local_part in ADMIN_INBOXES or re.split(r"[._+-]", local_part)[0] in ADMIN_INBOXES:
                 continue  # the website / hosting admin's inbox: often dead, never the right person
@@ -368,6 +376,14 @@ def ranked_contacts(lead: Lead, include_generic: bool = True) -> list[tuple[Lead
         local = re.sub(r"[^a-z]", "", row.email.split("@", 1)[0].lower())
         if points > 0 and local in places and points < LOCATION_SCORE:
             points, reason = LOCATION_SCORE, f"{row.email.split('@', 1)[0]}@ is the mailbox for this location ({places[local]})"
+        if points > 0 and not _confirmed(row):
+            from app.services.email_verification import must_confirm
+
+            other = must_confirm(row.email, getattr(lead, "website_url", "") or "")
+            if other:
+                # another company's domain (the parent company, a neighbouring practice, the web agency): the
+                # business's own addresses come first; it's only used once a verification service confirms it
+                points, reason = max(points - 20, 1), other
         if points > 0:
             rows.append((row, points, reason))
     return sorted(rows, key=lambda r: (-r[1], r[0].email))

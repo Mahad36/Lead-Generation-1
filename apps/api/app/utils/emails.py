@@ -50,6 +50,13 @@ FALSE_POSITIVE_DOMAINS = {
     "mydomain.com",
     "mywebsite.com",
     "mycompany.com",
+    "examples.com",
+    "sample.com",
+    "samplesite.com",
+    "yourdomain.co.uk",
+    "yourcompany.co.uk",
+    "domain.co.uk",
+    "email.co.uk",
     # site builders' own domains: their template placeholders (e.g. filler@godaddy.com), never a business inbox
     "godaddy.com",
     "secureserver.net",
@@ -148,6 +155,9 @@ def is_plausible_email(email: str) -> bool:
     if local in FALSE_POSITIVE_LOCAL:
         return False
     if local.endswith(".png") or local.endswith(".jpg") or local.endswith(".css"):
+        return False
+    # an image or asset file name that looks like an address (logo@2x.png, icon@3x.webp)
+    if re.search(r"\.(png|jpe?g|gif|svg|webp|avif|bmp|ico|css|js|woff2?|ttf|pdf|mp4)$", domain) or re.search(r"(^|\.)\d+x\.", domain):
         return False
     if len(value) > 254:
         return False
