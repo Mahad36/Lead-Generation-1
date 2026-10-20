@@ -495,7 +495,37 @@ def address_problem(db: Session, user_id: str, email: str) -> str:
         return f"{email} is a throwaway email address, not a business inbox."
     if parked_domain(domain):
         return f"{domain} is a parked or for-sale domain: nobody reads its mail."
+    if mail_server_exists(domain) is False:
+        return (f"{domain} names a mail server that no longer exists, so mail to {email} can't be delivered "
+                "(it would bounce).")
     return ""
+
+
+def mail_server_exists(domain: str) -> bool | None:
+    """Do the domain's mail servers (MX) still exist? The domain can name a server whose own address was deleted
+    (an old host, a cancelled mail plan): mail to it always bounces. Plain DNS, nothing is contacted.
+    True / False, or None when DNS couldn't tell (then nothing is blocked)."""
+    answer = dns_query(domain, "MX")
+    if answer is None:
+        return None
+    hosts = [
+        str(r.get("data", "")).split()[-1].rstrip(".")
+        for r in sorted((r for r in answer.get("Answer") or [] if r.get("type") == 15),
+                        key=lambda r: int(str(r.get("data", "0")).split()[0] or 0))
+    ]
+    hosts = [h for h in hosts if h and h != "."]
+    if not hosts:
+        return None  # no MX at all is handled by domain_accepts_mail
+    unknown = False
+    for host in hosts[:3]:
+        for rtype, code in (("A", 1), ("AAAA", 28)):
+            found = dns_query(host, rtype)
+            if found is None:
+                unknown = True
+                continue
+            if any(r.get("type") == code for r in found.get("Answer") or []):
+                return True
+    return None if unknown else False
 
 
 DISPOSABLE_DOMAINS = {

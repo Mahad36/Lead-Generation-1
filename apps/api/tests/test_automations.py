@@ -269,3 +269,20 @@ def test_safe_address_types():
     assert address_risk(lead(site, city="Miami", address="North Miami, FL"), "northmiami@acme-dental.com") == ""
     for risky in ("adam.cooper@quantum.com", "jane@acme-dental.com", "admin@acme-dental.com", "bob@verizon.net"):
         assert address_risk(lead(site), risky), risky
+
+
+def test_a_mail_server_that_no_longer_exists_is_caught(monkeypatch):
+    from app.services import deliverability
+
+    records = {
+        ("dead.co.uk", "MX"): {"Answer": [{"type": 15, "data": "10 mail.dead.co.uk."}]},
+        ("mail.dead.co.uk", "A"): {"Status": 3, "Answer": []},
+        ("mail.dead.co.uk", "AAAA"): {"Status": 3, "Answer": []},
+        ("live.com", "MX"): {"Answer": [{"type": 15, "data": "10 mx.live.com."}]},
+        ("mx.live.com", "A"): {"Answer": [{"type": 1, "data": "1.2.3.4"}]},
+    }
+    monkeypatch.setattr(deliverability, "dns_query", lambda name, rtype: records.get((name, rtype), {"Answer": []}))
+    assert deliverability.mail_server_exists("dead.co.uk") is False
+    assert deliverability.mail_server_exists("live.com") is True
+    monkeypatch.setattr(deliverability, "dns_query", lambda name, rtype: None)  # DNS unreachable: never blocks
+    assert deliverability.mail_server_exists("live.com") is None
