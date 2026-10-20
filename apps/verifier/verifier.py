@@ -104,19 +104,60 @@ def _host_lock(host: str) -> threading.Lock:
         return _host_locks.setdefault(host, threading.Lock())
 
 
-def mx_hosts(domain: str) -> list[str]:
+DOH = ("https://cloudflare-dns.com/dns-query", "https://dns.google/resolve")
+
+
+def _doh(name: str, rtype: str) -> dict | None:
+    """DNS over HTTPS, for when the normal DNS lookup fails (None when no answer could be had)."""
+    import json
+    import urllib.parse
+    import urllib.request
+
+    for url in DOH:
+        try:
+            request = urllib.request.Request(f"{url}?name={urllib.parse.quote(name)}&type={rtype}",
+                                             headers={"accept": "application/dns-json"})
+            with urllib.request.urlopen(request, timeout=8) as response:
+                return json.loads(response.read().decode())
+        except Exception:
+            continue
+    return None
+
+
+def mx_hosts(domain: str) -> list[str] | None:
+    """The domain's mail servers, best first. [] = DNS clearly says there's no mail server (the domain doesn't exist,
+    or has neither MX nor an address). None = DNS couldn't be asked, so nothing is known (never treated as invalid)."""
     try:
         answers = dns.resolver.resolve(domain, "MX", lifetime=8)
         rows = sorted((r.preference, str(r.exchange).rstrip(".")) for r in answers)
         return [host for _, host in rows if host and host != "."]
-    except (dns.resolver.NoAnswer, dns.resolver.NXDOMAIN):
+    except dns.resolver.NXDOMAIN:
+        return []
+    except dns.resolver.NoAnswer:
         try:
             dns.resolver.resolve(domain, "A", lifetime=8)
             return [domain]  # no MX: mail goes to the domain itself
-        except Exception:
+        except (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer):
             return []
+        except Exception:
+            return None
     except Exception:
+        pass
+    answer = _doh(domain, "MX")  # the normal lookup failed: ask over HTTPS
+    if answer is None:
+        return None
+    if answer.get("Status") == 3:
         return []
+    rows = sorted(
+        (int(str(a["data"]).split()[0]), str(a["data"]).split()[1].rstrip("."))
+        for a in answer.get("Answer") or [] if a.get("type") == 15 and len(str(a.get("data", "")).split()) == 2
+    )
+    if rows:
+        return [host for _, host in rows if host and host != "."]
+    a_answer = _doh(domain, "A")
+    if a_answer is None:
+        return None
+    return [domain] if any(a.get("type") == 1 for a in a_answer.get("Answer") or []) else []
 
 
 def _random_address(domain: str) -> str:
@@ -173,6 +214,8 @@ def check(email: str) -> Result:
             return hit[1]
     domain = email.rsplit("@", 1)[1]
     hosts = mx_hosts(domain)
+    if hosts is None:
+        return Result("unknown", "the DNS lookup failed, so nothing is known")
     if not hosts:
         return Result("invalid", "the domain has no mail server")
     result = Result("unknown", "no mail server answered")

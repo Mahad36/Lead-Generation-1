@@ -20,3 +20,30 @@ def test_temporary_and_accepted():
     assert classify(450, "4.2.0 Greylisted, please try again later") == "temporary"
     assert classify(250, "2.1.5 OK") == "accepted"
     assert classify(553, "something unusual") == "unknown"
+
+
+def test_a_failed_dns_lookup_is_never_invalid(monkeypatch):
+    import dns.exception
+    import dns.resolver
+
+    import verifier
+
+    def broken(*a, **k):
+        raise dns.exception.Timeout()
+
+    monkeypatch.setattr(dns.resolver, "resolve", broken)
+    monkeypatch.setattr(verifier, "_doh", lambda name, rtype: None)
+    result = verifier.check("info@realbusiness-example.com")
+    assert result.status == "unknown" and "DNS" in result.detail
+
+
+def test_a_domain_that_does_not_exist_is_invalid(monkeypatch):
+    import dns.resolver
+
+    import verifier
+
+    def nxdomain(*a, **k):
+        raise dns.resolver.NXDOMAIN()
+
+    monkeypatch.setattr(dns.resolver, "resolve", nxdomain)
+    assert verifier.check("info@no-such-domain-xyz.com").status == "invalid"
