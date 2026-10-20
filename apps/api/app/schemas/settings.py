@@ -28,7 +28,7 @@ class SettingsOut(BaseModel):
     track_opens: bool = True
     health_policy: str = "strict"
     automation_offers: str = ""
-    outreach_focus: str = "automation"
+    outreach_focus: str = "balanced"
     email_verifier_provider: str = ""
     email_verifier_url: str = ""
     email_verifier_scope: str = "risky"

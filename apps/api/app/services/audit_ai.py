@@ -266,7 +266,8 @@ Rules:
   would run automatically for this business and what it changes for them. Mention ONE website finding briefly, as
   part of the same fix ("I'd also fix..."), not as the opening. The free offer follows the automation. If
   audit.automation is missing, write it website-first instead.
-  "balanced": open with the main website finding, then the one automation paragraph (as above).
+  "balanced" (website issues first, automation second): open with the main website finding and its fix, then
+  the one automation paragraph (as above) as the second idea, tied to that business.
   "website": website first; the automation sentence is optional.
   In any focus you may mention ONE other service from sender.services in a single sentence, only when an audit
   finding directly calls for it (e.g. SEO for missing titles); never a list of services.

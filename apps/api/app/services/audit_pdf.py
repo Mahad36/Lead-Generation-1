@@ -683,21 +683,33 @@ def build_audit_pdf(
         # Both names in the same font and size (the smaller one that fits its 215-point column), each with its
         # website underneath; a long business name wraps onto a second line instead of shrinking to nothing
         col_w = 215
-        size = min(_fit_size(company, f["black"], 19, col_w, min_size=15), _fit_size(business, f["black"], 19, col_w, min_size=15))
-        to_lines = _wrap_lines(business, f["black"], size, col_w)[:2]
-        top = 90 + (size + 3) * (len(to_lines) - 1)  # first line moves up so the last one stays on the baseline
+        # Same size for both names: 19 pt, smaller only if the business name wouldn't fit in two lines
+        size = 19.0
+        while size > 14 and len(_wrap_lines(business, f["black"], size, col_w)) > 2:
+            size -= 1
+        size = min(size, _fit_size(company, f["black"], 19, col_w, min_size=14))
+        to_lines = _wrap_lines(business, f["black"], size, col_w)
+        if len(to_lines) > 3:  # very long names: three lines, the last one ending in "..."
+            to_lines = to_lines[:3]
+            while to_lines[2] and canvas.stringWidth(to_lines[2] + "...", f["black"], size) > col_w:
+                to_lines[2] = to_lines[2].rsplit(" ", 1)[0] if " " in to_lines[2] else to_lines[2][:-1]
+            to_lines[2] += "..."
+        first = 92  # the first line always sits the same distance under the "PRESENTED TO" label (never into it)
+        line_gap = size + 4
         canvas.setFont(f["black"], size)
         for index, line in enumerate(to_lines):
-            canvas.drawString(62, top - index * (size + 3), line)
-        canvas.drawString(296, top, company)
+            canvas.drawString(62, first - index * line_gap, line)
+        canvas.drawString(296, first, company)
+        # Each website directly under its name block, both on the same line
+        site_y = first - line_gap * (len(to_lines) - 1) - 19
         canvas.setFont(f["body"], 12)
         if domain:
-            canvas.drawString(62, 70, domain[:34])
+            canvas.drawString(62, site_y, domain[:34])
         if company_site:
-            canvas.drawString(296, 70, company_site[:34])
+            canvas.drawString(296, site_y, company_site[:34])
             width = canvas.stringWidth(company_site[:34], f["body"], 12)
             href = company_url if company_url.startswith("http") else f"https://{company_url}"
-            canvas.linkURL(href, (296, 66, 296 + width, 82), relative=0)  # clickable in the PDF
+            canvas.linkURL(href, (296, site_y - 4, 296 + width, site_y + 12), relative=0)  # clickable in the PDF
         canvas.restoreState()
 
     def static_page(name):

@@ -224,7 +224,7 @@ def free_offers(settings: UserSettings | None) -> list[str]:
     own = [line for line in lines if line]
     if own:
         return own
-    focus = (settings.outreach_focus if settings else "") or "automation"
+    focus = (settings.outreach_focus if settings else "") or "balanced"
     if focus == "automation":
         return AUTOMATION_FREE_OFFERS + DEFAULT_FREE_OFFERS[:1]
     if focus == "balanced":
@@ -270,7 +270,7 @@ def _sender_info(db: Session, user_id: str, audit: WebsiteAudit | None = None) -
         "contact_email": settings.contact_email if settings else "",
         "services": services,
         # automation: the email leads with the automation; balanced: website finding + one automation; website
-        "outreach_focus": (settings.outreach_focus if settings else "") or "automation",
+        "outreach_focus": (settings.outreach_focus if settings else "") or "balanced",
         "free_offers": free_offers(settings),
         # The sending Gmail's own signature (name, title, links) is added under the email when it is sent.
         "signature_added": _signature_expected(db, user_id, audit),
@@ -635,7 +635,7 @@ def _saved_screenshots(audit_id: str) -> dict:
     }
 
 
-PDF_VERSION = 3  # 2: the "Your Website Platform" section; 3: layout fixes (cover, headings, tags, score summaries)
+PDF_VERSION = 4  # 2: the "Your Website Platform" section; 3: layout fixes; 4: cover name block for long names
 
 # Add-ons worth naming to the business owner (not analytics / CDN plumbing)
 PDF_ADDON_CATEGORIES = ("platform", "page_builder", "forms", "booking", "reviews", "email", "performance",

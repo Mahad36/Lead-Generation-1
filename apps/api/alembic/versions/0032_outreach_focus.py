@@ -1,4 +1,5 @@
-"""outreach focus: what emails lead with (automation / balanced / website); automation first by default
+"""outreach focus: what emails lead with (automation / balanced / website); website issues first, then one
+automation ("balanced") by default
 
 Revision ID: 0032_outreach_focus
 Revises: 0031_own_verifier
@@ -16,7 +17,7 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.add_column("user_settings", sa.Column("outreach_focus", sa.String(16), nullable=False, server_default="automation"))
+    op.add_column("user_settings", sa.Column("outreach_focus", sa.String(16), nullable=False, server_default="balanced"))
 
 
 def downgrade() -> None:

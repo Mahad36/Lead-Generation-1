@@ -46,7 +46,7 @@ class UserSettings(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     health_policy: Mapped[str] = mapped_column(String(16), default="strict", server_default="strict", nullable=False)
     # What the outreach leads with: "automation" (automation first, website as support), "balanced" (website finding
     # plus one automation), "website" (website first)
-    outreach_focus: Mapped[str] = mapped_column(String(16), default="automation", server_default="automation", nullable=False)
+    outreach_focus: Mapped[str] = mapped_column(String(16), default="balanced", server_default="balanced", nullable=False)
     # Automations you offer (services/automations.py keys, comma-separated): audits and emails only propose these
     automation_offers: Mapped[str] = mapped_column(
         Text,

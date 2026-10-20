@@ -287,21 +287,21 @@ export default function SettingsPage() {
             <div className="mt-2 grid gap-2 sm:grid-cols-3">
               {(
                 [
+                  ["balanced", "Website issues first, then automation (recommended)", "Opens with the main website finding and its fix, then proposes one automation that fits the business."],
                   ["automation", "Automation first", "Opens with what the site shows that an automation would fix, pitches that automation; the website fix is a short supporting point. The PDF shows automations near the top."],
-                  ["balanced", "Balanced", "Opens with the main website finding, then one automation paragraph."],
                   ["website", "Website first", "Website redesign and fixes; an automation only as an optional extra."],
                 ] as const
               ).map(([key, title, hint]) => (
                 <label
                   key={key}
                   className={`cursor-pointer rounded-lg border px-3 py-2 text-sm ${
-                    (s.outreach_focus || "automation") === key ? "border-primary ring-2 ring-primary/30" : "border-border"
+                    (s.outreach_focus || "balanced") === key ? "border-primary ring-2 ring-primary/30" : "border-border"
                   }`}
                 >
                   <input
                     type="radio"
                     className="mr-2"
-                    checked={(s.outreach_focus || "automation") === key}
+                    checked={(s.outreach_focus || "balanced") === key}
                     onChange={() => set("outreach_focus", key)}
                   />
                   <span className="font-medium">{title}</span>
