@@ -136,3 +136,10 @@ def test_pdf_puts_automations_first_when_automation_leads():
                                       sender={"company_name": "Bee Creative"}, generated_at=datetime.now(UTC),
                                       automation_first=first)
     assert pdfs[True].startswith(b"%PDF") and pdfs[False].startswith(b"%PDF")
+
+
+def test_email_rules_ask_for_one_strong_automation_line():
+    from app.services.audit_ai import EMAIL_SYSTEM
+
+    assert "ONE strong line" in EMAIL_SYSTEM and "single sentence" in EMAIL_SYSTEM
+    assert '"AI" is fine' in EMAIL_SYSTEM and "never a list" in EMAIL_SYSTEM

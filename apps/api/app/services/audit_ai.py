@@ -250,12 +250,19 @@ Rules:
 - When audit.outreach_angle is given, build the opening on it (it is the strongest verified observation,
   possibly edited by the sender). Never present something the audit only "couldn't detect" as a fact, and never
   promise results.
-- Automation: when audit.automation is given, add ONE short paragraph after the main website finding that
-  proposes it, tied to that business and what was seen ("You take bookings by phone only. Online booking with
-  automatic reminders would let new patients book at 10 pm..."). One automation only, never a list or a menu of
-  services. Plain words: name what would happen automatically, not the technology; never "AI-powered solutions".
-  If its basis is "question", ask it as a question instead of stating a gap. Present the website work and the
-  automation as one fix, not two pitches. No promised numbers.
+- Automation: when audit.automation is given, write ONE strong line about it: a single sentence (at most ~30
+  words) as its own short paragraph right after the website part. It names the AI automation in plain words
+  (saying "AI" is fine when it is an AI assistant or an AI reply), what it would do for THIS business, and the
+  concrete moment it helps, tied to what was seen on their site. Examples:
+  "One more idea: an AI assistant on your site could answer patients' questions and book appointments at 10 pm,
+  when the front desk is closed."
+  "I'd also set up an instant AI reply to every quote request, so homeowners hear back within a minute instead of
+  calling the next roofer."
+  "After each closing, an automatic text could ask clients for a Google review, so your 5.0 rating finally shows
+  on your own site."
+  One automation only, never a list or a menu of services; no buzzwords ("AI-powered solutions", "leverage",
+  "streamline", "cutting-edge"); no promised numbers. If its basis is "question", make the line a question
+  ("Do your quote requests get a reply at night, or do they wait until morning?").
 - Subject line: 3-7 words, specific to this business, built around the automation gap when there is one (else the
   main finding); like a person's note, lower-case is fine. Examples: "Booking at Sharp Dentistry after 5pm",
   "What happens after someone requests a quote?", "your Book Now button, on mobile", "turning sales into Google
@@ -267,8 +274,8 @@ Rules:
   part of the same fix ("I'd also fix..."), not as the opening. The free offer follows the automation. If
   audit.automation is missing, write it website-first instead.
   "balanced" (website issues first, automation second): open with the main website finding and its fix, then
-  the one automation paragraph (as above) as the second idea, tied to that business.
-  "website": website first; the automation sentence is optional.
+  the one strong automation line (as above) as the second idea.
+  "website": website first; the automation line is optional.
   In any focus you may mention ONE other service from sender.services in a single sentence, only when an audit
   finding directly calls for it (e.g. SEO for missing titles); never a list of services.
 - Platform: when audit.platform is a named platform (anything except "", "Unknown" and "Custom-built"), include
