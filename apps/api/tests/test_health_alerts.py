@@ -88,3 +88,18 @@ def test_blacklists(monkeypatch):
 
     monkeypatch.setattr(health_alerts.socket, "gethostbyname", offline)
     assert blacklist_listings("good.com") is None  # unknown, not "clean"
+
+
+def test_one_bounce_in_a_young_inbox_is_not_a_warning():
+    from app.services.account_health import decide
+
+    acc = SimpleNamespace(status="connected", health_status="reduced", paused_reason="", restricted_until=None,
+                          ramp_started_on=None, daily_limit=10, health_reason="")
+    one = {"bounces_in_last": [1, 20], "bounce_rate": 0.05, "unsubscribes_in_last": [0, 20], "sent_total": 20}
+    assert decide(acc, one)[0] != "reduced"
+    two = {**one, "bounces_in_last": [2, 20], "bounce_rate": 0.10}
+    status, reason, factor = decide(acc, two)
+    assert status == "reduced" and reason.startswith("Warning signs") and factor == 0.5
+    found, _ = inbox_alerts(FakeDb(warmup=[("inbox", 5)], sent=20, replied=1),
+                            account(health_status="healthy", health_signals={"bounces_in_last": [1, 20]}))
+    assert "bounces" not in {f["kind"] for f in found}

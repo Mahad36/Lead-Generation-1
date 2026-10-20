@@ -114,7 +114,7 @@ def health_holds(db: Session, account: EmailAccount, policy: str) -> list[str]:
     from app.services.health_alerts import FREE_MAIL, inbox_alerts
 
     holds = HOLDS.get(policy, HOLDS[DEFAULT_POLICY])
-    found, _ = inbox_alerts(db, account)
+    found, _ = inbox_alerts(db, account, policy)
     domain = _domain(account)
     if domain not in FREE_MAIL:
         found += [

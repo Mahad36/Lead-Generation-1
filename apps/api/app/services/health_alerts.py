@@ -29,6 +29,7 @@ logger = get_logger("health_alerts")
 SAFE_DAILY_PER_INBOX = 40  # cold email per inbox; above this, spam complaints add up quickly
 SAFE_DAILY_PER_DOMAIN = 100  # all of an own domain's inboxes together
 BOUNCE_WARN, BOUNCE_CRITICAL, BOUNCE_MIN = 0.02, 0.05, 20
+MIN_BOUNCES = 2  # an inbox needs at least this many bounces before its bounce rate raises an alert
 UNSUB_WARN, UNSUB_CRITICAL, UNSUB_MIN = 0.01, 0.02, 50
 SPAM_WARN, SPAM_CRITICAL, SPAM_MIN = 0.10, 0.25, 5  # share of warm-up emails that landed in spam (7 days)
 NO_REPLY_MIN = 60  # emails in 14 days without a single reply
@@ -60,8 +61,8 @@ def _alert(key: str, kind: str, severity: str, subject: str, title: str, message
 # ---------------------------------------------------------------- per inbox
 
 
-def inbox_alerts(db: Session, account: EmailAccount) -> tuple[list[dict], set[str]]:
-    """(alerts, keys checked) for one connected inbox."""
+def inbox_alerts(db: Session, account: EmailAccount, policy: str = "strict") -> tuple[list[dict], set[str]]:
+    """(alerts, keys checked) for one connected inbox. policy: your health protection setting (for the wording)."""
     a, who = account.id, account.email_address
     keys = {f"{k}:{a}" for k in ("status", "bounces", "unsubscribes", "blocked", "warmup_spam", "placement", "volume", "no_replies")}
     found: list[dict] = []
@@ -69,14 +70,21 @@ def inbox_alerts(db: Session, account: EmailAccount) -> tuple[list[dict], set[st
 
     status = account.health_status or ""
     if status in ("reduced", "paused", "reconnect"):
+        strict = policy != "balanced"
         severity = "warning" if status == "reduced" else "critical"
         title = {
-            "reduced": "Sending was halved to protect this inbox",
+            # Strict protection holds a "reduced" inbox entirely; Balanced halves its sending
+            "reduced": "Sending paused to protect this inbox" if strict else "Sending was halved to protect this inbox",
             "paused": "Sending is paused on this inbox",
             "reconnect": "This inbox needs reconnecting",
         }[status]
         advice = {
-            "reduced": "The app halved this inbox's sending by itself. Leave it lower for 1-2 weeks; check the reasons.",
+            "reduced": (
+                "Nothing is sent from this inbox while the warning lasts (Strict protection). Check the reasons; if "
+                "you've dealt with them, \"I've reviewed this\" lets it send at half speed."
+                if strict else
+                "The app halved this inbox's sending by itself. Leave it lower for 1-2 weeks; check the reasons."
+            ),
             "paused": "Nothing is sent from it until the cause clears. Don't send from it manually in the meantime.",
             "reconnect": "Replace its App Password in Email setup. Nothing is sent from it until then.",
         }[status]
@@ -84,7 +92,7 @@ def inbox_alerts(db: Session, account: EmailAccount) -> tuple[list[dict], set[st
 
     bounced, total = signals.get("bounces_in_last") or [0, 0]
     rate = bounced / total if total else 0
-    if total >= BOUNCE_MIN and rate >= BOUNCE_WARN:
+    if total >= BOUNCE_MIN and bounced >= MIN_BOUNCES and rate >= BOUNCE_WARN:  # one bounce alone isn't a pattern
         found.append(_alert(
             f"bounces:{a}", "bounces", "critical" if rate >= BOUNCE_CRITICAL else "warning", who,
             f"High bounce rate: {rate:.0%}",
@@ -321,6 +329,9 @@ def domain_alerts(db: Session, domain: str, accounts: list[EmailAccount], force:
 
 
 def check_user(db: Session, user_id: str, force: bool = False) -> dict:
+    from app.services.send_protection import policy_for
+
+    policy = policy_for(db, user_id)
     accounts = db.query(EmailAccount).filter(EmailAccount.user_id == user_id).all()
     found: list[dict] = []
     checked: set[str] = set()
@@ -329,7 +340,7 @@ def check_user(db: Session, user_id: str, force: bool = False) -> dict:
         if account.status == "disconnected":
             continue  # you switched it off: its alerts are resolved below
         try:
-            alerts, keys = inbox_alerts(db, account)
+            alerts, keys = inbox_alerts(db, account, policy)
             found += alerts
             checked |= keys
         except Exception as exc:

@@ -43,6 +43,7 @@ BACKOFF_FIRST_MINUTES = 2
 BACKOFF_MAX_MINUTES = 60
 QUOTA_PAUSE = timedelta(hours=24)
 REJECTION_PAUSE = timedelta(hours=1)
+MIN_BOUNCES = 2  # bounce-based warnings need at least this many bounces, not just a rate
 SIGNAL_WINDOW = timedelta(days=30)  # bounce and unsubscribe rates look at this period
 
 STATUS_RANK = {"healthy": 0, "monitoring": 1, "reduced": 2, "paused": 3, "reconnect": 4}
@@ -220,7 +221,7 @@ def decide(account: EmailAccount, signals: dict, now: datetime | None = None) ->
         until = account.restricted_until.astimezone().strftime("%a %H:%M")
         return "paused", f"{account.health_reason or 'Temporarily restricted.'} Resumes {until}.", 0.0
     bounce, unsub = signals.get("bounce_rate"), signals.get("unsubscribe_rate")
-    sent_bounce = (signals.get("bounces_in_last") or [0, 0])[1]
+    bounced_count, sent_bounce = (signals.get("bounces_in_last") or [0, 0])[:2]
     sent_unsub = (signals.get("unsubscribes_in_last") or [0, 0])[1]
     failures = sum((signals.get("failures_24h") or {}).get(k, 0) for k in ("temporary", "rate_limited", "rejected", "quota"))
     limit = signals.get("provider_limit")
@@ -228,8 +229,10 @@ def decide(account: EmailAccount, signals: dict, now: datetime | None = None) ->
     if limit and used >= limit * CONSERVATIVE_SHARE:
         return "paused", f"{used} emails in the last 24 hours, close to Gmail's limit of {limit}. Waits for it to roll over.", 0.0
     reasons = []
-    if sent_bounce >= 20 and bounce is not None and bounce >= 0.03:
-        reasons.append(f"bounce rate {bounce:.0%} of the last {sent_bounce} emails")
+    # A single bounce in a young inbox's first emails isn't evidence of a bad list (1 in 20 is already "5%"):
+    # bounce-based warnings need at least MIN_BOUNCES bounces as well as the rate
+    if sent_bounce >= 20 and bounced_count >= MIN_BOUNCES and bounce is not None and bounce >= 0.03:
+        reasons.append(f"bounce rate {bounce:.0%} ({bounced_count} of the last {sent_bounce} emails)")
     if sent_unsub >= 50 and unsub is not None and unsub >= 0.02:
         reasons.append(f"{unsub:.0%} of recent recipients asked not to be emailed")
     if signals.get("rejected_7d"):
@@ -237,7 +240,7 @@ def decide(account: EmailAccount, signals: dict, now: datetime | None = None) ->
     if failures >= 3:
         reasons.append(f"{failures} send errors from Gmail in the last 24 hours")
     if reasons:
-        return "reduced", "Sending halved: " + "; ".join(reasons) + ".", 0.5
+        return "reduced", "Warning signs: " + "; ".join(reasons) + ".", 0.5
     watch = []
     if (signals.get("sent_total") or 0) < 20:
         watch.append("not enough sending history yet to judge")

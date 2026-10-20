@@ -202,7 +202,7 @@ def check_bounce_rate(db: Session, account: EmailAccount) -> bool:
         return False
     bounced = sum(1 for (at,) in recent if at)
     rate = bounced / len(recent)
-    if rate <= BOUNCE_PAUSE_RATE:
+    if bounced < 2 or rate <= BOUNCE_PAUSE_RATE:
         return False
     account.paused_reason = (
         f"Paused automatically: {bounced} of the last {len(recent)} emails bounced ({rate:.0%}). Too many bounces "
