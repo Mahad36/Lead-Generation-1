@@ -86,3 +86,22 @@ def test_ordinary_words_are_not_mistaken_for_tools():
     s = website_signals([text])
     assert not s["booking_tool"] and not s["chat_widget"] and not s["review_widget"]
     assert website_signals(['<script src="https://app.gettimely.com/book.js"></script>'])["booking_tool"] == "gettimely.com"
+
+
+def test_website_vendor_and_marketplace_addresses_are_not_leads():
+    from app.utils.emails import is_plausible_email
+
+    for email in ("support@agentfire.com", "service@atom.com", "info@prosites.com", "help@mail.hubspot.com", "filler@godaddy.com"):
+        assert not is_plausible_email(email), email
+    for email in ("aburke@onesothebysrealty.com", "info@borgesroofing.com", "owner@gmail.com", "dpo@warren-james.co.uk"):
+        assert is_plausible_email(email), email
+
+
+def test_website_vendor_and_placeholder_addresses_are_never_leads():
+    from app.utils.emails import is_plausible_email
+
+    for junk in ("support@agentfire.com", "service@atom.com", "filler@godaddy.com", "info@prosites.com",
+                 "mymail@mailservice.com", "help@mail.hubspot.com"):
+        assert not is_plausible_email(junk), junk
+    for real in ("aburke@onesothebysrealty.com", "info@borgesroofing.com", "owner@gmail.com", "info@dh-dental.co.uk"):
+        assert is_plausible_email(real), real

@@ -482,6 +482,12 @@ def address_problem(db: Session, user_id: str, email: str) -> str:
     settings = _settings(db, user_id)
     if settings is not None and not settings.check_email_domains:
         return ""
+    from app.utils.emails import is_plausible_email
+
+    if not is_plausible_email(email):
+        # Template placeholders, the website company's own support address, a domain-for-sale page: never the business
+        return (f"{email} isn't the business's own address (a website template placeholder or the website "
+                "company's address), so it would bounce or reach the wrong people.")
     if domain_accepts_mail(email) is False:
         return f"The email domain of {email} doesn't accept mail (no mail server), so it would bounce."
     return ""

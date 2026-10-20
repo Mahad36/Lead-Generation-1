@@ -61,6 +61,25 @@ FALSE_POSITIVE_DOMAINS = {
     "domain.tld",
 }
 
+# Companies that build or host the business's website, and domain marketplaces: their addresses appear on sites
+# they made (support links, template footers, "this domain is for sale" pages) but are never the business itself
+WEBSITE_VENDOR_DOMAINS = {
+    # real estate website builders
+    "agentfire.com", "luxurypresence.com", "placester.com", "idxbroker.com", "realgeeks.com", "kvcore.com",
+    "insiderealestate.com", "boldtrail.com", "sierrainteractive.com", "chime.me", "ylopo.com", "agentimage.com",
+    "realtyna.com", "showcaseidx.com", "ihomefinder.com", "wolfnet.com", "propertybase.com", "lofty.com",
+    # dental / medical practice website companies
+    "prosites.com", "officite.com", "pbhs.com", "sesamecommunications.com", "patientpop.com", "tebra.com",
+    "dentalqore.com", "practicecafe.com", "einsteinindustries.com", "televox.com", "ekwa.com",
+    # local-business marketing / website companies
+    "scorpion.co", "hibu.com", "thryv.com", "yodle.com", "localiq.com", "reachlocal.com", "web.com",
+    "networksolutions.com", "webflow.io", "hubspot.com", "mailchimp.com", "constantcontact.com", "shopify.com",
+    "bigcommerce.com", "elementor.com",
+    # domain marketplaces and parking pages (the site isn't a live business)
+    "atom.com", "dan.com", "afternic.com", "sedo.com", "hugedomains.com", "undeveloped.com", "squadhelp.com",
+    "bodis.com", "parkingcrew.net",
+}
+
 FALSE_POSITIVE_LOCAL = {
     "user",
     "username",
@@ -123,9 +142,8 @@ def is_plausible_email(email: str) -> bool:
     local, domain = value.split("@", 1)
     if not local or not domain or "." not in domain:
         return False
-    if domain in FALSE_POSITIVE_DOMAINS:
-        return False
-    if any(domain.endswith(f".{d}") for d in FALSE_POSITIVE_DOMAINS):
+    blocked = FALSE_POSITIVE_DOMAINS | WEBSITE_VENDOR_DOMAINS
+    if domain in blocked or any(domain.endswith(f".{d}") for d in blocked):
         return False
     if local in FALSE_POSITIVE_LOCAL:
         return False
