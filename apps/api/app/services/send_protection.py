@@ -64,6 +64,11 @@ HOLDS = {
 }
 # Paused / reconnect / Gmail restrictions are the provider stage (2), with their exact reason.
 POLICIES = tuple(HOLDS)
+# "Resume at low speed": you restart an inbox held only for bounces, at a few emails a day. Only bounce-based holds
+# are lifted (never Gmail blocking messages, blacklists, spam placement, missing SPF/DKIM or a broken login), and the
+# first new bounce ends it.
+LOW_SPEED_PER_DAY = 3
+LOW_SPEED_LIFTS = {"status", "bounces"}
 DEFAULT_POLICY = "strict"
 
 
@@ -108,9 +113,29 @@ def _domain(account: EmailAccount) -> str:
     return account.email_address.rsplit("@", 1)[-1].lower()
 
 
+def low_speed(db: Session, account: EmailAccount) -> dict | None:
+    """The inbox's low-speed resume, while it lasts: {"since", "per_day"}; None once it bounced again (or never on)."""
+    state = (getattr(account, "health", None) or {}).get("low_speed")
+    if not state:
+        return None
+    try:
+        since = datetime.fromisoformat(state["since"])
+    except (KeyError, ValueError):
+        return None
+    new_bounces = (
+        db.query(func.count(EmailMessage.id))
+        .filter(EmailMessage.email_account_id == account.id, EmailMessage.bounced_at > since)
+        .scalar()
+        or 0
+    )
+    return None if new_bounces else state
+
+
 def health_holds(db: Session, account: EmailAccount, policy: str) -> list[str]:
     """The warning signs that hold this inbox now: live from its own signals, plus its domain's open alerts.
-    A warning you reviewed (acknowledged) no longer holds; anything critical always does."""
+    A warning you reviewed (acknowledged) no longer holds; anything critical always does, except bounce-based holds
+    while you run the inbox at low speed (and only until its next bounce)."""
+    slow = low_speed(db, account)
     from app.services.health_alerts import FREE_MAIL, inbox_alerts
 
     holds = HOLDS.get(policy, HOLDS[DEFAULT_POLICY])
@@ -142,6 +167,8 @@ def health_holds(db: Session, account: EmailAccount, policy: str) -> list[str]:
             continue
         if alert["severity"] == "warning" and alert["key"] in acknowledged:
             continue
+        if slow and kind in LOW_SPEED_LIFTS:
+            continue  # held only for bounces, and you resumed it at low speed
         reasons.append(alert.get("message") or alert["title"] if kind == "status" else alert["title"])
     return reasons
 
@@ -241,7 +268,12 @@ def evaluate(db: Session, account: EmailAccount | None, *, refresh: bool = True,
         assessed, holds = False, []
     limit = effective_daily_limit(account)
     recommended = getattr(account, "recommended_limit", None)
-    safe = 0 if recommended is not None and recommended <= 0 else (limit or None)
+    slow = low_speed(db, account) if assessed else None
+    if slow:
+        # low speed: a few emails a day, whatever the halved / held capacity would say
+        safe = min(limit or slow.get("per_day", LOW_SPEED_PER_DAY), slow.get("per_day", LOW_SPEED_PER_DAY))
+    else:
+        safe = 0 if recommended is not None and recommended <= 0 else (limit or None)
     return decide(
         account,
         holds=holds,

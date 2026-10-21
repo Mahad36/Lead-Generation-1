@@ -387,7 +387,12 @@ def protection_summary(db: Session, account: EmailAccount) -> dict:
         return {"eligible": False, "stage": "health", "reason": "Health couldn't be checked; sending is held."}
     state = (account.health or {}).get("protection") or {}
     low, high = send_protection.delay_range(db, account.user_id)
+    slow = send_protection.low_speed(db, account)
     return {
+        "low_speed": slow,
+        # offered when the only thing holding the inbox is its bounce rate
+        "low_speed_available": not slow and verdict.stage == "health" and "bounce" in (verdict.reason or "").lower()
+        and not any(w in (verdict.reason or "").lower() for w in ("blocked", "blacklist", "spam", "spf", "dkim")),
         **verdict.as_dict(),
         "next_send_at": send_protection.ready_at(db, account).isoformat(),
         "delay_seconds": [low, high],

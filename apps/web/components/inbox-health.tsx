@@ -48,6 +48,8 @@ export type Protection = {
   events: { action: string; at: string; details: Record<string, string> }[];
   next_send_at?: string;
   delay_seconds?: [number, number];
+  low_speed?: { since: string; per_day: number } | null;
+  low_speed_available?: boolean;
 };
 
 const STAGE_LABEL: Record<string, string> = {
@@ -63,7 +65,7 @@ const EVENT_LABEL: Record<string, string> = {
 };
 
 /** Can it send, and why not: health first, then Gmail restrictions, then safe capacity, then your limit. */
-function ProtectionPanel({ p }: { p: Protection }) {
+function ProtectionPanel({ p, onLowSpeed }: { p: Protection; onLowSpeed?: (on: boolean) => void }) {
   const safety = p.stage === "health" || p.stage === "provider";
   return (
     <div className={`space-y-1 rounded-md p-2 text-xs ${safety ? "bg-red-50 dark:bg-red-950" : "bg-background"}`}>
@@ -73,6 +75,30 @@ function ProtectionPanel({ p }: { p: Protection }) {
         {p.blocked_since && safety ? <span className="text-muted">since {formatDate(p.blocked_since)}</span> : null}
       </div>
       {p.reason ? <p className={safety ? "text-red-700 dark:text-red-300" : "text-muted"}>{p.reason}</p> : null}
+      {p.low_speed ? (
+        <div className="flex flex-wrap items-center gap-2">
+          <Badge tone="warn">Low speed: {p.low_speed.per_day} emails a day</Badge>
+          <span className="text-muted">
+            Since {formatDate(p.low_speed.since)}. Ends by itself at the next bounce.
+          </span>
+          {onLowSpeed ? (
+            <Button variant="secondary" onClick={() => onLowSpeed(false)}>
+              Stop low speed
+            </Button>
+          ) : null}
+        </div>
+      ) : p.low_speed_available && onLowSpeed ? (
+        <div className="space-y-1 rounded-md border border-border p-2">
+          <Button variant="secondary" onClick={() => onLowSpeed(true)}>
+            Resume at low speed (3 emails a day)
+          </Button>
+          <p className="text-muted">
+            Held only for its bounce rate. Low speed sends at most 3 a day with every filter and verification still on;
+            the first new bounce holds it again. It never overrides Gmail blocking your emails, blacklists or spam
+            placement.
+          </p>
+        </div>
+      ) : null}
       {safety ? (
         <p className="text-muted">
           Health comes before limits: nothing is sent from this inbox, even with capacity left. Emails wait (or go from
@@ -204,7 +230,14 @@ export function InboxHealth({ account, inboxes, onChange }: { account: InboxHeal
 
   return (
     <div className="mt-3 space-y-2 border-t border-border pt-3 text-sm">
-      {a.health_summary ? <AccountHealth h={a.health_summary} busy={busy} onRecheck={() => run("health/refresh", "")} /> : null}
+      {a.health_summary ? (
+        <AccountHealth
+          h={a.health_summary}
+          busy={busy}
+          onRecheck={() => run("health/refresh", "")}
+          onLowSpeed={(on) => run("low-speed", on ? "Low speed on: 3 emails a day" : "Low speed off", { on })}
+        />
+      ) : null}
       {a.paused_reason ? (
         <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-red-300 bg-red-50 p-2 text-red-800 dark:border-red-800 dark:bg-red-950/40 dark:text-red-200">
           <span>{a.paused_reason}</span>
@@ -419,7 +452,17 @@ const FAILURE_LABEL: Record<string, string> = {
 };
 
 /** Sending health from the evidence the app can see, today's safe capacity, and what Gmail doesn't share. */
-function AccountHealth({ h, busy, onRecheck }: { h: HealthSummary; busy: string; onRecheck: () => void }) {
+function AccountHealth({
+  h,
+  busy,
+  onRecheck,
+  onLowSpeed,
+}: {
+  h: HealthSummary;
+  busy: string;
+  onRecheck: () => void;
+  onLowSpeed?: (on: boolean) => void;
+}) {
   const failures = Object.entries(h.failures_24h || {}).filter(([, n]) => n);
   return (
     <div className="space-y-2 rounded-md border border-border p-2">
@@ -434,7 +477,7 @@ function AccountHealth({ h, busy, onRecheck }: { h: HealthSummary; busy: string;
         </Button>
       </div>
       {h.reason ? <p className="text-xs text-muted">{h.reason}</p> : null}
-      {h.protection ? <ProtectionPanel p={h.protection} /> : null}
+      {h.protection ? <ProtectionPanel p={h.protection} onLowSpeed={onLowSpeed} /> : null}
       <div className="grid gap-x-6 gap-y-1 text-xs sm:grid-cols-2">
         <div>
           Safe capacity today: <span className="font-medium">{h.recommended_today ?? h.limit_today}</span>

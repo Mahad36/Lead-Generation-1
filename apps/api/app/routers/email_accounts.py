@@ -281,6 +281,40 @@ def _own_account(db: Session, user: User, account_id: str) -> EmailAccount:
     return account
 
 
+class LowSpeedIn(BaseModel):
+    on: bool = True
+
+
+@router.post("/{account_id}/low-speed")
+def set_low_speed(account_id: str, data: LowSpeedIn, request: Request, user: User = Depends(get_current_user),
+                  db: Session = Depends(get_db)):
+    """Resume an inbox held only for bounces at a few emails a day (every filter still on); off: back to the hold.
+    The first new bounce ends it by itself."""
+    from datetime import UTC, datetime
+
+    from sqlalchemy.orm.attributes import flag_modified
+
+    from app.services.send_protection import LOW_SPEED_PER_DAY
+
+    account = _own_account(db, user, account_id)
+    health = dict(account.health or {})
+    if data.on:
+        health["low_speed"] = {"since": datetime.now(UTC).isoformat(), "per_day": LOW_SPEED_PER_DAY}
+        account.paused_reason, account.paused_at = "", None
+    else:
+        health.pop("low_speed", None)
+    account.health = health
+    flag_modified(account, "health")
+    write_audit(db, user_id=user.id, action="email_account.low_speed_on" if data.on else "email_account.low_speed_off",
+                entity_type="email_account", entity_id=account.id, details={"per_day": LOW_SPEED_PER_DAY} if data.on else {},
+                **get_client_meta(request))
+    db.commit()
+    from app.services.account_health import assess
+
+    assess(db, account)
+    return {"low_speed": data.on}
+
+
 @router.post("/{account_id}/resume")
 def resume_account(account_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """Resume an inbox that paused itself after too many bounces (and the campaigns waiting for it)."""

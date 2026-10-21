@@ -804,3 +804,30 @@ def test_own_checker_end_to_end(monkeypatch):
     assert "works" in ev.account_status("own", "secret", "https://verify.test")
     with pytest.raises(ev.VerifierError):
         ev.verify_with("own", "wrong-token", "info@acme.com", "https://verify.test")
+
+
+def test_low_speed_resume_for_bounce_holds_only(db):
+    from app.models import EmailMessage
+
+    user = make_user(db)
+    account = make_account(db, user, "ahad@x.com", status="reduced",
+                           reason="Warning signs: bounce rate 8% (2 of the last 25 emails).", limit=8)
+    account.health_signals = {"bounces_in_last": [2, 25], "unsubscribes_in_last": [0, 25], "rejected_7d": 0}
+    db.commit()
+    assert send_protection.evaluate(db, account, refresh=False).stage == "health"
+    since = datetime.now(UTC) - timedelta(minutes=1)
+    account.health = {"low_speed": {"since": since.isoformat(), "per_day": 3}}
+    db.commit()
+    v = send_protection.evaluate(db, account, refresh=False)
+    assert v.ok and v.safe_capacity == 3  # sends again, at most 3 a day
+    # a new bounce ends it: held again
+    db.add(EmailMessage(user_id=user.id, email_account_id=account.id, recipient_email="dead@y.com", subject="s",
+                        status="sent", sent_at=datetime.now(UTC), bounced_at=datetime.now(UTC)))
+    db.commit()
+    assert send_protection.evaluate(db, account, refresh=False).stage == "health"
+    # never lifts Gmail blocking messages
+    blocked = make_account(db, user, "b@x.com")
+    blocked.health_signals = {"rejected_7d": 1, "bounces_in_last": [0, 20]}
+    blocked.health = {"low_speed": {"since": since.isoformat(), "per_day": 3}}
+    db.commit()
+    assert send_protection.evaluate(db, blocked, refresh=False).stage == "health"
