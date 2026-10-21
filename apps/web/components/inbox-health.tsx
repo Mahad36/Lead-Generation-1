@@ -480,7 +480,12 @@ function AccountHealth({
       {h.protection ? <ProtectionPanel p={h.protection} onLowSpeed={onLowSpeed} /> : null}
       <div className="grid gap-x-6 gap-y-1 text-xs sm:grid-cols-2">
         <div>
-          Safe capacity today: <span className="font-medium">{h.recommended_today ?? h.limit_today}</span>
+          Safe capacity today:{" "}
+          <span className="font-medium">
+            {h.protection && !h.protection.eligible && ["health", "provider"].includes(h.protection.stage)
+              ? "0 (paused by health protection)"
+              : h.protection?.safe_capacity ?? h.recommended_today ?? h.limit_today}
+          </span>
           {h.your_daily_limit ? ` (your limit ${h.your_daily_limit})` : ""}
         </div>
         <div>

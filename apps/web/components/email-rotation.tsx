@@ -124,6 +124,7 @@ export function EmailRotation({ value, onChange }: { value: Rotation; onChange: 
             ) : (
               connected.map((a) => {
                 const h = a.health_summary;
+                const held = !!h?.protection && !h.protection.eligible && ["health", "provider"].includes(h.protection.stage);
                 const ticked = value.accountIds.includes(a.id);
                 return (
                   <tr key={a.id} className="border-t border-border">
@@ -140,10 +141,18 @@ export function EmailRotation({ value, onChange }: { value: Rotation; onChange: 
                     ) : null}
                     <td className="py-1 pr-2">{a.email_address}</td>
                     <td className="py-1 pr-2">
-                      {h ? <Badge tone={HEALTH_TONE[h.status] || "default"}>{h.label}</Badge> : a.status}
+                      {held ? (
+                        <Badge tone="bad">Paused (health)</Badge>
+                      ) : h ? (
+                        <Badge tone={HEALTH_TONE[h.status] || "default"}>{h.label}</Badge>
+                      ) : (
+                        a.status
+                      )}
                     </td>
-                    <td className="py-1 pr-2">{h ? h.recommended_today ?? h.limit_today : a.limit_today ?? a.daily_limit}</td>
-                    <td className="py-1 pr-2">{a.remaining_today}</td>
+                    <td className="py-1 pr-2">
+                      {held ? 0 : h?.protection?.safe_capacity ?? (h ? h.recommended_today ?? h.limit_today : a.limit_today ?? a.daily_limit)}
+                    </td>
+                    <td className="py-1 pr-2">{held ? 0 : h?.protection?.remaining_safe ?? a.remaining_today}</td>
                     <td className="py-1 pr-2">
                       {h?.protection && !h.protection.eligible
                         ? h.protection.stage === "health" || h.protection.stage === "provider"
