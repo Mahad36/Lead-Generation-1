@@ -204,6 +204,8 @@ def test_admin_inboxes_and_likely_typos_are_skipped():
 def test_a_rejected_address_falls_back_to_the_next_one(monkeypatch):
     from types import SimpleNamespace
 
+    from app.services.address_check import LOW_RISK, Result
+
     from app.services import auto_audits
 
     rows = [SimpleNamespace(email=e, verification_status="domain_ok", email_type="", contact_name="", job_title="",
@@ -212,6 +214,7 @@ def test_a_rejected_address_falls_back_to_the_next_one(monkeypatch):
     lead = SimpleNamespace(id="l1", city="", address="", emails=rows, primary_email="info@dead.com", extra={})
     db = SimpleNamespace(commit=lambda: None)
     monkeypatch.setattr(auto_audits, "address_problem", lambda db, user, email: "")
+    monkeypatch.setattr(auto_audits, "address_check", lambda *a, **k: Result(LOW_RISK))
     monkeypatch.setattr(auto_audits, "verification_problem",
                         lambda db, user, lead, email: "ZeroBounce says the mailbox doesn't exist" if email == "info@dead.com" else "")
     assert auto_audits.checked_recipient(db, "u", lead) == ""
@@ -221,6 +224,8 @@ def test_a_rejected_address_falls_back_to_the_next_one(monkeypatch):
 def test_admin_only_lead_needs_a_confirmed_mailbox(monkeypatch):
     from types import SimpleNamespace
 
+    from app.services.address_check import LOW_RISK, Result
+
     from app.services import auto_audits
 
     row = SimpleNamespace(email="admin@acme.com", verification_status="domain_ok", email_type="", contact_name="",
@@ -228,6 +233,7 @@ def test_admin_only_lead_needs_a_confirmed_mailbox(monkeypatch):
     lead = SimpleNamespace(id="l1", city="", address="", emails=[row], primary_email="admin@acme.com", extra={})
     db = SimpleNamespace(commit=lambda: None)
     monkeypatch.setattr(auto_audits, "address_problem", lambda *a: "")
+    monkeypatch.setattr(auto_audits, "address_check", lambda *a, **k: Result(LOW_RISK))
     monkeypatch.setattr(auto_audits, "verification_problem", lambda *a: "")  # verification off: nothing confirmed
     assert "admin" in auto_audits.checked_recipient(db, "u", lead)
 

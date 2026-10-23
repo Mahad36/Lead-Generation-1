@@ -478,27 +478,16 @@ def domain_accepts_mail(email_or_domain: str) -> bool | None:
 
 
 def address_problem(db: Session, user_id: str, email: str) -> str:
-    """Why this address shouldn't be emailed ("" when it's fine or the check is switched off)."""
+    """Why this address is ruled out for good ("" otherwise): the local risk check found it would bounce. Holds
+    (DNS didn't answer, no mail server published) aren't returned here: the send itself enforces those
+    (address_check.enforce), so with this switched off the address is still checked before it is emailed."""
     settings = _settings(db, user_id)
     if settings is not None and not settings.check_email_domains:
         return ""
-    from app.utils.emails import is_plausible_email
+    from app.services.address_check import BLOCKED, check
 
-    if not is_plausible_email(email):
-        # Template placeholders, the website company's own support address, a domain-for-sale page: never the business
-        return (f"{email} isn't the business's own address (a website template placeholder or the website "
-                "company's address), so it would bounce or reach the wrong people.")
-    if domain_accepts_mail(email) is False:
-        return f"The email domain of {email} doesn't accept mail (no mail server), so it would bounce."
-    domain = email.rsplit("@", 1)[-1].strip().lower()
-    if domain in DISPOSABLE_DOMAINS:
-        return f"{email} is a throwaway email address, not a business inbox."
-    if parked_domain(domain):
-        return f"{domain} is a parked or for-sale domain: nobody reads its mail."
-    if mail_server_exists(domain) is False:
-        return (f"{domain} names a mail server that no longer exists, so mail to {email} can't be delivered "
-                "(it would bounce).")
-    return ""
+    result = check(db, user_id, email)
+    return result.reason if result.status == BLOCKED else ""
 
 
 def mail_server_exists(domain: str) -> bool | None:

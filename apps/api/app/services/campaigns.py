@@ -848,14 +848,31 @@ def send_claimed_lead(db: Session, campaign_lead: CampaignLead) -> str:
         return "failed"
     from app.services.email_verification import verification_problem
 
-    problem = address_problem(db, campaign.user_id, to) or verification_problem(db, campaign.user_id, lead, to)
+    from app.services.address_check import check as address_check
+    from app.services.address_check import low_risk_only
+
+    problem = address_problem(db, campaign.user_id, to)
+    local = address_check(db, campaign.user_id, to)
+    if not problem and local.retry_later:
+        # DNS didn't answer: not sent now, back in the queue to be checked again
+        campaign_lead.status, campaign_lead.locked_at, campaign_lead.locked_by = "queued", None, ""
+        campaign_lead.error_message = local.reason
+        db.commit()
+        return "address_check_waiting"
+    if not problem and not local.low_risk:
+        problem = local.reason  # fail closed: an inconclusive local risk check holds the address
+    problem = problem or verification_problem(db, campaign.user_id, lead, to)
     if problem:
         campaign_lead.status = "skipped"
-        campaign_lead.skip_reason = "email_domain_rejects_mail" if "domain" in problem else "mailbox_does_not_exist"
+        campaign_lead.skip_reason = (
+            "address_held" if not local.low_risk and problem == local.reason and local.status == "held"
+            else "email_domain_rejects_mail" if "domain" in problem else "mailbox_does_not_exist"
+        )
         campaign_lead.error_message = problem
         campaign_lead.locked_at = None
         db.commit()
         return "skipped"
+    cc = low_risk_only(db, campaign.user_id, cc)
     if not (campaign_lead.subject or "").strip() or not (campaign_lead.html_body or "").strip():
         campaign_lead.status = "failed"
         campaign_lead.error_message = "Email content is missing"
@@ -1169,9 +1186,24 @@ def advance_audit_campaign(db: Session, campaign: Campaign) -> tuple[str, int | 
         # address), all before the audit, so no Claude tokens are spent on an address that would bounce
         from app.services.auto_audits import checked_recipient
 
+        from app.services.address_check import RETRY_LATER
+
         problem = checked_recipient(db, campaign.user_id, lead)
+        if problem.startswith(RETRY_LATER):
+            # DNS didn't answer: the lead waits in the queue (no audit, nothing sent) and is checked again later
+            claimed.status, claimed.locked_at, claimed.locked_by = "queued", None, ""
+            claimed.error_message = problem
+            db.commit()
+            return "address_check_waiting", 15 * 60
         if problem:
-            reason = "mailbox_does_not_exist" if "doesn't exist" in problem else "email_domain_rejects_mail"
+            from app.services.auto_audits import held_or_undeliverable
+
+            held = held_or_undeliverable(db, campaign.user_id, lead) == "held"
+            reason = (
+                "address_held" if held
+                else "mailbox_does_not_exist" if "doesn't exist" in problem else "email_domain_rejects_mail"
+            )
+            claimed.error_message = problem
     if reason:
         claimed.status = "unsubscribed" if reason == "suppressed" else "skipped"
         claimed.skip_reason, claimed.locked_at, claimed.locked_by = reason, None, ""
@@ -1530,7 +1562,7 @@ def launch_summary(db: Session, user_id: str, lead_ids: list[str], data: Campaig
     valid = [
         lead
         for lead in leads
-        if lead.primary_email and not lead.do_not_contact and lead.email_status not in ("bounced", "undeliverable")
+        if lead.primary_email and not lead.do_not_contact and lead.email_status not in ("bounced", "undeliverable", "held")
     ]
 
     mode = data.rotation_mode or ("single" if data.email_account_id else "auto")

@@ -103,7 +103,7 @@ def db(pg, monkeypatch):
     import app.database
 
     session = pg()
-    for table in ("audit_logs", "health_alerts", "email_messages", "campaign_leads", "campaigns", "leads",
+    for table in ("address_checks", "audit_logs", "health_alerts", "email_messages", "campaign_leads", "campaigns", "leads",
                   "email_accounts", "user_settings", "users"):
         session.execute(text(f"DELETE FROM {table}"))
     session.commit()

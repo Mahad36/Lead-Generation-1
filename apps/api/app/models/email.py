@@ -271,3 +271,21 @@ class HealthAlert(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # You reviewed this warning: it stops holding sending (critical alerts can't be acknowledged)
     acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class AddressCheck(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """The latest local risk check of one recipient address (services/address_check.py): format, sending history and
+    domain DNS only. Never a mailbox verification. status: low_risk | blocked | held."""
+
+    __tablename__ = "address_checks"
+    __table_args__ = (UniqueConstraint("user_id", "email", name="uq_address_check_user_email"),)
+
+    user_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False), ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    email: Mapped[str] = mapped_column(String(320), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    kind: Mapped[str] = mapped_column(String(40), default="", nullable=False)  # which check decided, e.g. "no_mx"
+    reason: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    checks: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)  # each step: check / outcome / detail
+    checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

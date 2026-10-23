@@ -557,8 +557,12 @@ export default function SettingsPage() {
             <span>
               <span className="font-medium">Skip emails that would bounce</span>
               <span className="block text-xs text-muted">
-                Before auditing or emailing a lead, checks that the email&apos;s domain can receive mail. Leads that can&apos;t
-                are marked &quot;undeliverable&quot; and skipped, which keeps your bounce rate low.
+                Before auditing a lead, rules out addresses whose domain can&apos;t receive mail and moves on to the
+                business&apos;s next address. Leads with none left are marked &quot;undeliverable&quot; and skipped.
+                Whatever this is set to, every first email and follow-up gets a local risk check right before it is
+                sent: address format, earlier bounces and the domain&apos;s DNS. If a check fails, can&apos;t be completed
+                or is out of date, the email is held, not sent. This is not mailbox verification: it can&apos;t tell
+                whether the mailbox itself exists.
               </span>
             </span>
           </label>

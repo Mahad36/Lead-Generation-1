@@ -38,6 +38,8 @@ from app.services.website_audit import (
     send_audit,
     start_audit,
 )
+from app.services.address_check import RETRY_LATER
+from app.services.address_check import check as address_check
 from app.services.email_verification import verification_problem
 from app.services.deliverability import WAITING_FOR_SCHEDULE, WAITING_FOR_WINDOW, address_problem, waiting_step
 from app.utils.dates import local_day_start
@@ -93,7 +95,7 @@ def candidate_leads_query(db: Session, user_id: str, job_id: str | None = None):
         Lead.last_contacted_at.is_(None),
         Lead.status != "processing",
         Lead.source != "seed",  # demo sample businesses with fake websites
-        Lead.email_status != "undeliverable",  # its email domain can't receive mail
+        Lead.email_status.not_in(["undeliverable", "held"]),  # can't receive mail / held by the local risk check
         Lead.id.not_in(audited),
         Lead.id.not_in(cooling),
         Lead.id.not_in(exhausted),
@@ -365,9 +367,9 @@ def checked_recipient(db: Session, user_id: str, lead: Lead, log=None) -> str:
                 choose_primary(db, lead)
                 db.commit()
     email = lead.primary_email or ""
-    problem = address_problem(db, user_id, email) or verification_problem(db, user_id, lead, email)
+    problem = _recipient_problem(db, user_id, lead, email)
     for _ in range(3):
-        if not problem or not lead.emails:
+        if not problem or problem.startswith(RETRY_LATER) or not lead.emails:
             break
         status = "invalid" if "doesn't exist" in problem else "risky" if problem.startswith("Blocked:") else "domain_rejects"
         next_email = reject_and_fall_back(db, lead, email, status)
@@ -376,8 +378,29 @@ def checked_recipient(db: Session, user_id: str, lead: Lead, log=None) -> str:
         if log:
             log.info("recipient_fallback", lead_id=lead.id, rejected=email, now=next_email, why=problem[:120])
         email = next_email
-        problem = address_problem(db, user_id, email) or verification_problem(db, user_id, lead, email)
+        problem = _recipient_problem(db, user_id, lead, email)
     return problem
+
+
+def held_or_undeliverable(db: Session, user_id: str, lead: Lead) -> str:
+    """The lead's email status once no address of it can be emailed: "held" when the local risk check couldn't
+    decide (e.g. no mail server published), "undeliverable" when an address was found to bounce."""
+    from app.services.address_check import HELD, latest
+
+    stored = latest(db, user_id, lead.primary_email or "")
+    return "held" if stored and stored["status"] == HELD else "undeliverable"
+
+
+def _recipient_problem(db: Session, user_id: str, lead: Lead, email: str) -> str:
+    """The free checks, the local risk check's holds (fail closed: an uncertain result is a "no" too), then the
+    verification service. A hold starting with RETRY_LATER is about the moment (DNS didn't answer), not the address."""
+    problem = address_problem(db, user_id, email)
+    if problem:
+        return problem
+    result = address_check(db, user_id, email)
+    if not result.low_risk:
+        return result.reason
+    return verification_problem(db, user_id, lead, email)
 
 
 def _note_hold(db: Session, job: ScrapingJob, reason: str) -> None:
@@ -427,9 +450,14 @@ def poll_job(db: Session, job: ScrapingJob) -> int:
         # set up) the verification service, all before any Claude tokens. A rejected address falls back to the
         # business's next-best one instead of dropping the lead.
         problem = checked_recipient(db, job.user_id, lead, log)
+        if problem.startswith(RETRY_LATER):
+            # DNS didn't answer: no address can be checked right now, so no audit starts; tried again next round
+            _note_hold(db, job, problem)
+            log.info("file_audits_held_dns", reason=problem[:160])
+            break
         if problem:
-            # Don't spend an audit on an email that would bounce
-            lead.email_status = "undeliverable"
+            # Don't spend an audit on an email that would bounce, or whose check was inconclusive (fail closed)
+            lead.email_status = held_or_undeliverable(db, job.user_id, lead)
             lead.notes = (lead.notes + "\n" if lead.notes else "") + problem
             db.commit()
             log.info("auto_audit_skipped_undeliverable", lead_id=lead.id)

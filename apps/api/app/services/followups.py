@@ -22,6 +22,7 @@ from app.logging_config import get_logger
 from app.models import Campaign, EmailAccount, EmailMessage, Lead, ScrapingJob, UserSettings, WebsiteAudit
 from app.services.deliverability import in_send_window
 from app.services.send_protection import HealthHold, evaluate, guard, ready_at
+from app.services import address_check
 from app.services.gmail import GmailSendError, send_gmail_message
 from app.services.suppression import is_suppressed
 from app.services.gmail_signature import account_signature
@@ -249,6 +250,15 @@ def send_followup(db: Session, root: EmailMessage, step: int, steps: int) -> Ema
     )
     if existing:
         return existing
+    # The local risk check of the recipient, fail closed, before anything else (no Claude tokens for a held address):
+    # AddressHeld = not sent. A failed check ends the thread's follow-ups; an inconclusive one is tried next round.
+    try:
+        address_check.enforce(db, root.user_id, root.recipient_email)
+    except address_check.AddressHeld as held:
+        if held.result.status == address_check.BLOCKED:
+            root.followups_done_at = datetime.now(UTC)
+            db.commit()
+        raise
     settings = _settings(db, root.user_id)
     account = db.get(EmailAccount, root.email_account_id)
     lead = db.get(Lead, root.lead_id) if root.lead_id else None
@@ -392,6 +402,9 @@ def run_followups(db: Session) -> dict:
         try:
             send_followup(db, root, step, steps)
             sent += 1
+        except address_check.AddressHeld as held:
+            waiting += 1
+            logger.info("followup_address_held", root_id=root.id, status=held.result.status, reason=held.result.reason[:200])
         except HealthHold as hold:
             waiting += 1
             logger.info("followup_held", root_id=root.id, stage=hold.verdict.stage, reason=hold.verdict.reason[:200])

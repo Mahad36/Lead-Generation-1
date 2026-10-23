@@ -1,6 +1,7 @@
 from app.models.audit import AuditLog
 from app.models.campaign import Campaign, CampaignLead
 from app.models.email import (
+    AddressCheck,
     EmailAccount,
     ConversationMessage,
     EmailEvent,
@@ -19,6 +20,7 @@ from app.models.website import Website, WebsiteAnalysis, WebsiteTechnology
 from app.models.website_audit import WebsiteAudit
 
 __all__ = [
+    "AddressCheck",
     "AuditLog",
     "Campaign",
     "CampaignLead",

@@ -1186,16 +1186,32 @@ def send_audit(
 
     # Checked again right before sending (the address may have been chosen before today's rules, or by hand):
     # never send to an address that would bounce or a risky type that isn't confirmed
-    problem = deliverability.address_problem(db, user_id, recipient) or (
-        verification_problem(db, user_id, lead, recipient) if lead else ""
-    )
+    from app.services import address_check
+
+    problem = deliverability.address_problem(db, user_id, recipient)
+    # The local risk check (format, sending history, domain DNS), fail closed: only a fresh low-risk result sends.
+    # It is not mailbox verification; the verification service (if set up) still runs after it.
+    local = address_check.check(db, user_id, recipient)
+    if not problem and local.retry_later:
+        if manual:
+            raise HTTPException(status_code=400, detail=local.reason)
+        # DNS didn't answer: waits, like the sending hours, and is checked again on the next round
+        raise deliverability.SendDeferred(local.reason, f"Waiting: {local.reason}")
+    if not problem and not local.low_risk:
+        problem = local.reason
+    problem = problem or (verification_problem(db, user_id, lead, recipient) if lead else "")
     if problem:
         if not manual:
             audit.auto_send = False  # held for you: choose another address on the lead, then send
-            audit.step = "Not sent: the address may bounce (choose another on the lead)"
+            audit.step = (
+                "Held: the local risk check couldn't clear this address (choose another on the lead)"
+                if problem == local.reason and local.status == address_check.HELD
+                else "Not sent: the address may bounce (choose another on the lead)"
+            )
             audit.error_message = problem[:500]
             db.commit()
         raise HTTPException(status_code=400, detail=problem)
+    cc = address_check.low_risk_only(db, user_id, cc)  # CC'd colleagues too: one that doesn't pass is left out
     if not manual:
         # The file's / campaign's own schedule in the lead's time zone, else your sending hours
         deliverability.require_send_time(db, user_id, audit_schedule(db, audit), lead)
