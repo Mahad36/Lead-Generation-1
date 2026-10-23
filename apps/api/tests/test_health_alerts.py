@@ -59,7 +59,7 @@ def test_each_warning_sign_raises_an_alert():
     )
     found, _ = inbox_alerts(FakeDb(warmup=[("inbox", 6), ("spam", 4)], sent=70, replied=0), acc)
     assert kinds(found) == {
-        ("status", "warning"), ("bounces", "warning"), ("unsubscribes", "critical"), ("blocked", "critical"),
+        ("status", "warning"), ("bounces", "warning"), ("unsubscribes", "warning"), ("blocked", "critical"),
         ("warmup_spam", "critical"), ("placement", "critical"), ("volume", "warning"), ("no_replies", "warning"),
     }
 
@@ -103,3 +103,28 @@ def test_one_bounce_in_a_young_inbox_is_not_a_warning():
     found, _ = inbox_alerts(FakeDb(warmup=[("inbox", 5)], sent=20, replied=1),
                             account(health_status="healthy", health_signals={"bounces_in_last": [1, 20]}))
     assert "bounces" not in {f["kind"] for f in found}
+
+
+def test_one_unsubscribe_doesnt_hold_an_inbox():
+    from app.services.account_health import decide
+
+    acc = SimpleNamespace(status="connected", health_status="healthy", paused_reason="", restricted_until=None,
+                          ramp_started_on=None, daily_limit=8, health_reason="")
+    one = {"bounces_in_last": [1, 50], "bounce_rate": 0.02, "unsubscribes_in_last": [1, 50],
+           "unsubscribe_rate": 0.02, "sent_total": 50}
+    assert decide(acc, one)[0] != "reduced"
+    found, _ = inbox_alerts(FakeDb(warmup=[("inbox", 5)], sent=50, replied=1),
+                            account(health_signals={"bounces_in_last": [1, 50], "unsubscribes_in_last": [1, 50]}))
+    assert "unsubscribes" not in {f["kind"] for f in found}
+    # 2-4%: a warning you can review, never a hold by itself
+    few = {**one, "unsubscribes_in_last": [2, 50], "unsubscribe_rate": 0.04}
+    assert decide(acc, few)[0] == "monitoring"
+    found, _ = inbox_alerts(FakeDb(warmup=[("inbox", 5)], sent=50, replied=1),
+                            account(health_signals={"bounces_in_last": [1, 50], "unsubscribes_in_last": [2, 50]}))
+    assert ("unsubscribes", "warning") in kinds(found)
+    # 5%+: held as before
+    many = {**one, "unsubscribes_in_last": [3, 50], "unsubscribe_rate": 0.06}
+    assert decide(acc, many)[0] == "reduced"
+    found, _ = inbox_alerts(FakeDb(warmup=[("inbox", 5)], sent=50, replied=1),
+                            account(health_signals={"bounces_in_last": [1, 50], "unsubscribes_in_last": [3, 50]}))
+    assert ("unsubscribes", "critical") in kinds(found)

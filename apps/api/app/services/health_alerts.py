@@ -30,7 +30,8 @@ SAFE_DAILY_PER_INBOX = 40  # cold email per inbox; above this, spam complaints a
 SAFE_DAILY_PER_DOMAIN = 100  # all of an own domain's inboxes together
 BOUNCE_WARN, BOUNCE_CRITICAL, BOUNCE_MIN = 0.02, 0.05, 20
 MIN_BOUNCES = 2  # an inbox needs at least this many bounces before its bounce rate raises an alert
-UNSUB_WARN, UNSUB_CRITICAL, UNSUB_MIN = 0.01, 0.02, 50
+UNSUB_WARN, UNSUB_CRITICAL, UNSUB_MIN = 0.02, 0.05, 50
+MIN_UNSUBS = 2  # one opt-out alone isn't a pattern (1-4% is normal for cold email); only 5%+ holds the inbox
 SPAM_WARN, SPAM_CRITICAL, SPAM_MIN = 0.10, 0.25, 5  # share of warm-up emails that landed in spam (7 days)
 NO_REPLY_MIN = 60  # emails in 14 days without a single reply
 DOMAIN_CHECK_EVERY = timedelta(hours=24)
@@ -104,7 +105,7 @@ def inbox_alerts(db: Session, account: EmailAccount, policy: str = "strict") -> 
 
     out, total = signals.get("unsubscribes_in_last") or [0, 0]
     rate = out / total if total else 0
-    if total >= UNSUB_MIN and rate >= UNSUB_WARN:
+    if total >= UNSUB_MIN and out >= MIN_UNSUBS and rate >= UNSUB_WARN:
         found.append(_alert(
             f"unsubscribes:{a}", "unsubscribes", "critical" if rate >= UNSUB_CRITICAL else "warning", who,
             f"Many recipients asked not to be emailed: {rate:.0%}",
