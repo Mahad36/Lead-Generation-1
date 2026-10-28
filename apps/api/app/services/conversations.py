@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 
 from app.logging_config import get_logger
 from app.models import ConversationMessage, EmailAccount, EmailMessage, Lead, UserSettings
-from app.services.gmail import GmailSendError, daily_limit_reached, send_gmail_message
+from app.services.gmail import GmailSendError, send_gmail_message
 from app.services.tracking import new_rfc_message_id, open_pixel_html, tracking_summary, tracks_opens
 from app.services.gmail_signature import account_signature
 from app.utils.signature import append_signature
@@ -260,12 +260,7 @@ def send_reply(db: Session, user_id: str, root_id: str, body: str) -> dict:
     account = db.get(EmailAccount, root.email_account_id) if root.email_account_id else None
     if not account or account.status != "connected":
         raise HTTPException(status_code=400, detail="The email account this conversation started from isn't connected.")
-    if daily_limit_reached(db, account):
-        raise HTTPException(
-            status_code=429,
-            detail=f"Daily sending limit reached for {account.email_address}. It resets at midnight; "
-                   "change it in AI & settings -> Sending.",
-        )
+    # No daily limit here: answering someone who wrote to you isn't outreach (and doesn't count towards the limit)
     items = (
         db.query(ConversationMessage)
         .filter(ConversationMessage.root_message_id == root.id)

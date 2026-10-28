@@ -19,7 +19,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.logging_config import get_logger
-from app.models import EmailAccount, EmailMessage
+from app.models import ConversationMessage, EmailAccount, EmailMessage
 from app.utils.dates import local_day_start, local_today
 from app.services.integrations import GoogleOAuthConfig, resolve_google_oauth
 from app.utils.crypto import decrypt_text, encrypt_text
@@ -467,14 +467,19 @@ def sender_header(account: EmailAccount) -> str:
 
 
 def sent_today_count(db: Session, account: EmailAccount) -> int:
-    """Real emails this account sent today (UTC), whatever sent them: audits, campaigns, manual sends."""
+    """Real emails this account sent today (UTC): audits, campaigns, follow-ups, manual sends.
+    Your own answers to a lead's reply (Replies page) don't count; the limit is for outreach."""
     start = local_day_start()  # the user's midnight
+    replies = db.query(ConversationMessage.email_message_id).filter(
+        ConversationMessage.source == "app", ConversationMessage.email_message_id.isnot(None)
+    )
     return (
         db.query(func.count(EmailMessage.id))
         .filter(
             EmailMessage.email_account_id == account.id,
             EmailMessage.sent_at >= start,
             EmailMessage.is_test.is_(False),
+            EmailMessage.id.not_in(replies),
         )
         .scalar()
         or 0

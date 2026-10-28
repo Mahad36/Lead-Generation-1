@@ -159,7 +159,7 @@ class ConversationMessage(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     email_account_id: Mapped[str | None] = mapped_column(
         UUID(as_uuid=False), ForeignKey("email_accounts.id", ondelete="SET NULL"), nullable=True
     )
-    # Your answer sent from the app is also an EmailMessage (open tracking, daily send limit)
+    # Your answer sent from the app is also an EmailMessage (open tracking; not counted towards the daily send limit)
     email_message_id: Mapped[str | None] = mapped_column(
         UUID(as_uuid=False), ForeignKey("email_messages.id", ondelete="SET NULL"), nullable=True
     )
