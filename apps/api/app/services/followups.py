@@ -6,7 +6,8 @@ thread (In-Reply-To / References), without the PDF. Claude writes each one from 
 is used if the AI is unavailable. They stop for good as soon as the lead replies, bounces, unsubscribes or is marked
 do-not-contact, when its campaign's follow-ups are switched off, or after the last step (followups_done_at is set).
 Stopping a campaign / scrape file only stops new first emails; threads already started keep their follow-ups.
-Paused campaigns / files, sending hours, daily limits and paused inboxes only delay them.
+Paused campaigns / files, sending hours, paused inboxes and their own daily allowance only delay them. From an inbox
+at full health they don't count towards your daily limit (send_protection.counts_followups).
 """
 
 from __future__ import annotations
@@ -283,7 +284,7 @@ def send_followup(db: Session, root: EmailMessage, step: int, steps: int) -> Ema
     html += f'<p style="font-size:12px;color:#666">Not interested? <a href="{unsubscribe}">Unsubscribe</a></p>'
     text += f"\n\nUnsubscribe: {unsubscribe}"
     # Re-checked immediately before sending, with the inbox locked until this email's record is committed
-    guard(db, account)  # HealthHold: not sent; it is due again next round
+    guard(db, account, followup=True)  # HealthHold: not sent; it is due again next round
 
     message = EmailMessage(
         user_id=root.user_id,
@@ -396,7 +397,7 @@ def run_followups(db: Session) -> dict:
         account = db.get(EmailAccount, root.email_account_id)
         # Account health protection first (health, Gmail restrictions, safe capacity, your limit). The follow-up
         # stays on the first email's inbox (same thread), so while that inbox isn't safe it waits.
-        if not evaluate(db, account).ok or ready_at(db, account) > datetime.now(UTC):
+        if not evaluate(db, account, followup=True).ok or ready_at(db, account) > datetime.now(UTC):
             waiting += 1  # health first, then this inbox's rotation delay
             continue
         try:

@@ -173,19 +173,26 @@ def health_holds(db: Session, account: EmailAccount, policy: str) -> list[str]:
     return reasons
 
 
-def in_flight_count(db: Session, account: EmailAccount, now: datetime | None = None) -> int:
+def counts_followups(db: Session, account: EmailAccount) -> bool:
+    """Follow-ups count towards the day's emails only while health lowers this inbox's capacity (low speed, reduced,
+    paused, still ramping up); at full health they go out on top of your daily limit, like your replies."""
+    from app.services.deliverability import effective_daily_limit
+
+    return bool(low_speed(db, account)) or effective_daily_limit(account) != (account.daily_limit or 0)
+
+
+def in_flight_count(db: Session, account: EmailAccount, now: datetime | None = None,
+                    followups: bool = True) -> int:
     since = (now or datetime.now(UTC)) - IN_FLIGHT
-    return (
-        db.query(func.count(EmailMessage.id))
-        .filter(
-            EmailMessage.email_account_id == account.id,
-            EmailMessage.status == "sending",
-            EmailMessage.sent_at.is_(None),
-            EmailMessage.created_at >= since,
-        )
-        .scalar()
-        or 0
+    query = db.query(func.count(EmailMessage.id)).filter(
+        EmailMessage.email_account_id == account.id,
+        EmailMessage.status == "sending",
+        EmailMessage.sent_at.is_(None),
+        EmailMessage.created_at >= since,
     )
+    if not followups:
+        query = query.filter(EmailMessage.followup_of_id.is_(None))
+    return query.scalar() or 0
 
 
 def decide(
@@ -197,8 +204,12 @@ def decide(
     in_flight: int,
     safe_capacity: int | None,
     now: datetime | None = None,
+    capacity: bool = True,
+    followups_today: int = 0,
 ) -> Verdict:
-    """The decision itself (pure: every input is given). Order: health, provider, safe capacity, your limit."""
+    """The decision itself (pure: every input is given). Order: health, provider, safe capacity, your limit.
+    capacity=False (a follow-up from an inbox at full health): health, provider, then the follow-ups' own allowance
+    (as many a day as your daily limit, so a backlog of follow-ups never becomes a sudden spike)."""
     now = now or datetime.now(UTC)
     user_limit = (account.daily_limit or 0) if account else 0
 
@@ -222,6 +233,10 @@ def decide(
     if until and until > now:
         detail = getattr(account, "health_reason", "") or "Gmail asked to slow down."
         return verdict("provider", f"{who}: {detail} (until {until.astimezone():%a %H:%M}).")
+    if not capacity:
+        if user_limit and followups_today >= user_limit:
+            return verdict("user_limit", f"{who}: sent today's {user_limit} follow-ups (they have their own allowance).")
+        return verdict("", "")
     # 3. effective safe capacity, 4. your limit
     used = sent_today + in_flight
     if safe_capacity is not None and safe_capacity <= 0:
@@ -252,8 +267,10 @@ def refresh_if_stale(db: Session, account: EmailAccount) -> bool:
         return False
 
 
-def evaluate(db: Session, account: EmailAccount | None, *, refresh: bool = True, policy: str | None = None) -> Verdict:
-    """Can this inbox send one more outreach email right now? (No lock: guard() is the one used to send.)"""
+def evaluate(db: Session, account: EmailAccount | None, *, refresh: bool = True, policy: str | None = None,
+             followup: bool = False) -> Verdict:
+    """Can this inbox send one more outreach email right now? (No lock: guard() is the one used to send.)
+    followup: a follow-up in a thread already started; outside counts_followups() only health decides."""
     from app.services.deliverability import effective_daily_limit
     from app.services.gmail import sent_today_count
 
@@ -274,13 +291,36 @@ def evaluate(db: Session, account: EmailAccount | None, *, refresh: bool = True,
         safe = min(limit or slow.get("per_day", LOW_SPEED_PER_DAY), slow.get("per_day", LOW_SPEED_PER_DAY))
     else:
         safe = 0 if recommended is not None and recommended <= 0 else (limit or None)
+    every_email = counts_followups(db, account)
+    own_allowance = followup and not every_email
     return decide(
         account,
         holds=holds,
         assessed=assessed,
         sent_today=sent_today_count(db, account),
-        in_flight=in_flight_count(db, account),
+        in_flight=in_flight_count(db, account, followups=every_email),
         safe_capacity=safe,
+        capacity=not own_allowance,
+        followups_today=followups_today_count(db, account) if own_allowance else 0,
+    )
+
+
+def followups_today_count(db: Session, account: EmailAccount) -> int:
+    """Follow-ups this inbox sent today or is sending right now."""
+    from app.utils.dates import local_day_start
+
+    since = datetime.now(UTC) - IN_FLIGHT
+    return (
+        db.query(func.count(EmailMessage.id))
+        .filter(
+            EmailMessage.email_account_id == account.id,
+            EmailMessage.followup_of_id.isnot(None),
+            EmailMessage.is_test.is_(False),
+            (EmailMessage.sent_at >= local_day_start())
+            | ((EmailMessage.status == "sending") & EmailMessage.sent_at.is_(None) & (EmailMessage.created_at >= since)),
+        )
+        .scalar()
+        or 0
     )
 
 
@@ -296,7 +336,8 @@ class HealthHold(Exception):
 
 
 def guard(
-    db: Session, account: EmailAccount, *, spacing: bool = True, delay: tuple[int, int] | None = None
+    db: Session, account: EmailAccount, *, spacing: bool = True, delay: tuple[int, int] | None = None,
+    followup: bool = False,
 ) -> Verdict:
     """Immediately before sending: re-check everything with the inbox row locked. The lock holds until the caller
     commits the email's "sending" record (which then counts as in flight), so concurrent sends queue up here.
@@ -306,7 +347,7 @@ def guard(
     the next delay is reserved here: next_send_at = now + a random gap from `delay` (default: your settings)."""
     refresh_if_stale(db, account)  # may commit: before taking the lock
     lock(db, account)
-    verdict = evaluate(db, account, refresh=False)
+    verdict = evaluate(db, account, refresh=False, followup=followup)
     now = datetime.now(UTC)
     if verdict.ok and spacing:
         ready = ready_at(db, account, now)
