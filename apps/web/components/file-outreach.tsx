@@ -245,7 +245,7 @@ export function FileOutreachControls({
       {o.status === "running" || o.status === "paused" ? (
         confirmStop ? (
           <span className="flex items-center gap-1">
-            <Button variant="danger" disabled={busy} onClick={() => send("stop", {}, "Stopped. Nothing more is sent from this file.")}>
+            <Button variant="danger" disabled={busy} onClick={() => send("stop", {}, "Stopped. No new leads are emailed from this file; leads already emailed still get their follow-ups.")}>
               Yes, stop
             </Button>
             <Button variant="ghost" onClick={() => setConfirmStop(false)}>

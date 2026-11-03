@@ -4,7 +4,8 @@ After each first email (audit email or campaign email) that has `followups_enabl
 `followup_days[N]` days after the previous email of the thread, from the same inbox, as a reply in the same Gmail
 thread (In-Reply-To / References), without the PDF. Claude writes each one from the first email; a plain template
 is used if the AI is unavailable. They stop for good as soon as the lead replies, bounces, unsubscribes or is marked
-do-not-contact, when its campaign / scrape file is stopped, or after the last step (followups_done_at is set).
+do-not-contact, when its campaign's follow-ups are switched off, or after the last step (followups_done_at is set).
+Stopping a campaign / scrape file only stops new first emails; threads already started keep their follow-ups.
 Paused campaigns / files, sending hours, daily limits and paused inboxes only delay them.
 """
 
@@ -117,11 +118,10 @@ def _stop_reason(db: Session, root: EmailMessage, settings: UserSettings | None)
     account = db.get(EmailAccount, root.email_account_id) if root.email_account_id else None
     if not account or account.status == "disconnected":
         return "sending inbox removed"
-    campaign, job, _ = _origin(db, root)
-    if campaign and (campaign.status == "stopped" or (campaign.extra or {}).get("followups", True) is False):
-        return "campaign stopped"
-    if job and job.outreach_status == "stopped":
-        return "file outreach stopped"
+    # Stopping a campaign / scrape file only stops new first emails: leads already emailed still get their follow-ups
+    campaign, _, _ = _origin(db, root)
+    if campaign and (campaign.extra or {}).get("followups", True) is False:
+        return "campaign follow-ups off"
     return ""
 
 

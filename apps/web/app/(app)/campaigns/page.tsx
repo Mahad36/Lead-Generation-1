@@ -61,7 +61,7 @@ export default function CampaignsPage() {
           ? `Paused "${c.name}". Emails already being prepared wait until you resume.`
           : action === "resume"
             ? `Resumed "${c.name}"`
-            : `Stopped "${c.name}". Nothing more will be sent.`
+            : `Stopped "${c.name}". No new leads are emailed; leads already emailed still get their follow-ups.`
       );
       setConfirmStop("");
       await load();
