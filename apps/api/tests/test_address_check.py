@@ -287,7 +287,8 @@ def thread(db, user, account, to):
     from app.models import EmailMessage
 
     root = EmailMessage(user_id=user.id, email_account_id=account.id, recipient_email=to, subject="Your website",
-                        status="sent", sent_at=datetime.now(UTC) - timedelta(days=4), followups_enabled=True)
+                        status="sent", sent_at=datetime.now(UTC) - timedelta(days=4), followups_enabled=True,
+                        open_count=1)
     db.add(root)
     db.commit()
     return root

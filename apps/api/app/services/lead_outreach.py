@@ -36,6 +36,14 @@ SIDE_STAGES = {
     "audit_stopped": "Audit stopped",
 }
 LABELS = dict(STAGES) | SIDE_STAGES
+# Agency pitches (Agency outreach): no audit or audit PDF, Claude reads the agency's site and writes the pitch
+AGENCY_LABELS = LABELS | {
+    "auditing": "Reading website",
+    "audited": "Writing pitch",
+    "pdf_generated": "Writing pitch",
+    "email_generated": "Pitch ready",
+    "audit_stopped": "Stopped",
+}
 AUDITING = {"queued", "fetching", "measuring", "capturing", "analyzing"}
 
 
@@ -163,7 +171,8 @@ def outreach_for_leads(db: Session, user_id: str, leads: list[Lead]) -> dict[str
                 }.get(file_outreach.get(lead.scraping_job_id, ""), "Outreach is off for this file")
         out[lead.id] = {
             "stage": stage,
-            "stage_label": LABELS.get(stage, stage),
+            "stage_label": (AGENCY_LABELS if audit and audit.kind == "agency" else LABELS).get(stage, stage),
+            "kind": (audit.kind if audit else "") or "audit",
             "note": note,
             "audit_id": audit.id if audit else None,
             "audit_status": audit.status if audit else "",

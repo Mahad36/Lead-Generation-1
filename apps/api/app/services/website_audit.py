@@ -16,7 +16,7 @@ from pathlib import Path
 from bs4 import BeautifulSoup
 from email_validator import EmailNotValidError, validate_email
 from fastapi import HTTPException
-from sqlalchemy import or_, update
+from sqlalchemy import and_, or_, update
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
@@ -143,16 +143,20 @@ def list_audits(
     offset: int = 0,
     platform: str | None = None,
     finding_type: str | None = None,
+    view: str | None = None,
+    kind: str | None = None,
 ) -> list[WebsiteAudit]:
-    query = _audits_query(db, user_id, lead_id, q, platform, finding_type)
-    return query.order_by(WebsiteAudit.created_at.desc()).offset(offset).limit(limit).all()
+    query = _audits_query(db, user_id, lead_id, q, platform, finding_type, view, kind)
+    # Sent emails: newest sent first; everything else: newest first
+    order = (WebsiteAudit.sent_at.desc(),) if view == "sent" else ()
+    return query.order_by(*order, WebsiteAudit.created_at.desc()).offset(offset).limit(limit).all()
 
 
 def count_audits(
     db: Session, user_id: str, lead_id: str | None = None, q: str | None = None, platform: str | None = None,
-    finding_type: str | None = None,
+    finding_type: str | None = None, view: str | None = None, kind: str | None = None,
 ) -> int:
-    return _audits_query(db, user_id, lead_id, q, platform, finding_type).count()
+    return _audits_query(db, user_id, lead_id, q, platform, finding_type, view, kind).count()
 
 
 def audit_platforms(db: Session, user_id: str) -> list[dict]:
@@ -168,10 +172,40 @@ def audit_platforms(db: Session, user_id: str) -> list[dict]:
     return sorted(({"platform": p or "Unknown", "count": n} for p, n in rows), key=lambda r: -r["count"])
 
 
+def not_sent_condition():
+    """Audits whose email didn't go out and won't by itself: the audit or the send failed, or the email was stopped
+    before sending (campaign stopped, address may bounce, held by the risk check). Shown in the "Not sent" tab."""
+    from app.services.campaigns import CAMPAIGN_STOPPED_STEP
+
+    return or_(
+        WebsiteAudit.status.in_(["failed", "send_failed"]),
+        and_(
+            WebsiteAudit.status == "ready",
+            WebsiteAudit.sent_at.is_(None),
+            or_(
+                WebsiteAudit.step == CAMPAIGN_STOPPED_STEP,
+                WebsiteAudit.step.like("Not sent:%"),
+                WebsiteAudit.step.like("Held:%"),
+            ),
+        ),
+    )
+
+
 def _audits_query(
-    db: Session, user_id: str, lead_id: str | None, q: str | None, platform: str | None = None, finding_type: str | None = None
+    db: Session, user_id: str, lead_id: str | None, q: str | None, platform: str | None = None, finding_type: str | None = None,
+    view: str | None = None, kind: str | None = None,
 ):
     query = db.query(WebsiteAudit).filter(WebsiteAudit.user_id == user_id)
+    if kind:  # "audit": website audits only (Website audits page); "agency": agency pitches
+        query = query.filter(WebsiteAudit.kind == kind)
+    if view == "not_sent":
+        query = query.filter(not_sent_condition())
+    elif view == "main":
+        query = query.filter(~not_sent_condition())
+    elif view == "sent":  # emails that went out
+        query = query.filter(WebsiteAudit.sent_at.isnot(None))
+    elif view == "pending":  # being written, ready for review or waiting to send (not failed / held)
+        query = query.filter(WebsiteAudit.sent_at.is_(None), ~not_sent_condition(), WebsiteAudit.status != "cancelled")
     if platform:
         query = query.filter(WebsiteAudit.platform.in_(["", "Unknown", "Other"]) if platform == "Unknown" else WebsiteAudit.platform == platform)
     if finding_type:
@@ -337,6 +371,7 @@ def serialize_audit(audit: WebsiteAudit, *, full: bool = True) -> dict:
         "outreach_angle": audit.outreach_angle or (audit.report or {}).get("outreach_angle", ""),
         "auto_send": audit.auto_send,
         "trigger": audit.trigger,
+        "kind": audit.kind or "audit",  # "agency": white-label pitch with your company profile (Agency outreach)
         "overall_score": audit.overall_score,
         "headline": (audit.report or {}).get("headline", ""),
         "has_pdf": bool(audit.pdf_size),
@@ -383,6 +418,7 @@ def start_audit(
     email_account_id: str | None = None,
     website_url: str | None = None,
     trigger: str = "manual",
+    kind: str = "audit",
     meta: dict | None = None,
 ) -> WebsiteAudit:
     from app.services.campaigns import resolve_email_account
@@ -421,6 +457,7 @@ def start_audit(
         lead_id=lead.id,
         website_url=target_url,
         trigger=trigger,
+        kind=kind if kind in ("audit", "agency") else "audit",
         recipient_email=recipient,
         auto_send=auto_send,
         email_account_id=email_account_id,
@@ -435,7 +472,7 @@ def start_audit(
         action="website_audit.started",
         entity_type="website_audit",
         entity_id=audit.id,
-        details={"lead_id": lead.id, "auto_send": auto_send, "trigger": trigger},
+        details={"lead_id": lead.id, "auto_send": auto_send, "trigger": trigger, "kind": kind},
         **(meta or {}),
     )
     db.commit()
@@ -635,7 +672,7 @@ def _saved_screenshots(audit_id: str) -> dict:
     }
 
 
-PDF_VERSION = 4  # 2: the "Your Website Platform" section; 3: layout fixes; 4: cover name block for long names
+PDF_VERSION = 5  # 2: the "Your Website Platform" section; 3: layout fixes; 4: cover name block for long names; 5: no contact email in "How to get it"
 
 # Add-ons worth naming to the business owner (not analytics / CDN plumbing)
 PDF_ADDON_CATEGORIES = ("platform", "page_builder", "forms", "booking", "reviews", "email", "performance",
@@ -710,6 +747,51 @@ def run_audit(db: Session, audit_id: str) -> str:
         db.commit()
         _discover_contacts(db, audit, lead, log)
 
+        if audit.kind == "agency":
+            # Agency pitch: no speed test, screenshots or audit PDF; Claude writes from the agency's own site and
+            # your offer notes, and your company profile PDF is attached when it is sent
+            current = "drafting_email"
+            _set_step(db, audit, "drafting_email")
+            _draft_agency_email(db, audit, lead, site)
+            _set_step(db, audit, "ready")
+            log.info("agency_email_ready")
+        else:
+            _run_audit_steps(db, audit, lead, lead_info, site, shots_dir, settings, log)
+            current = "drafting_email"
+            _set_step(db, audit, "ready")
+            log.info("audit_ready", score=audit.overall_score, pdf_bytes=audit.pdf_size)
+    except Exception as exc:  # every failure is recorded on the audit
+        current = getattr(exc, "audit_step", None) or current
+        db.rollback()
+        audit = db.get(WebsiteAudit, audit_id)
+        if isinstance(exc, (AuditStopped, AICancelledError)) or _stop_requested(db, audit_id):
+            # Stopped by the user: cancel_audit already recorded it; just clean up.
+            if audit.status != "cancelled":
+                audit.failed_step = current
+                audit.status, audit.step, audit.auto_send = "cancelled", STEP_LABELS["cancelled"], False
+                db.commit()
+            _stop_requests.discard(audit_id)
+            shutil.rmtree(shots_dir, ignore_errors=True)
+            log.info("audit_stopped", step=current)
+            return "cancelled"
+        audit.status = "failed"
+        audit.failed_step = current
+        audit.step = STEP_LABELS["failed"]
+        audit.error_message = _friendly_error(exc)
+        db.commit()
+        log.error("audit_failed", step=current, error=str(exc), error_type=exc.__class__.__name__)
+        shutil.rmtree(shots_dir, ignore_errors=True)
+        _sync_campaign(db, audit)
+        return "failed"
+    return _after_ready(db, audit, log)
+
+
+def _run_audit_steps(db: Session, audit: WebsiteAudit, lead: Lead, lead_info: dict, site: dict, shots_dir: str,
+                     settings, log) -> None:
+    """The website audit itself: speed test, screenshots, Claude's review, the PDF and the email draft.
+    A failure carries the step it happened in (audit_step)."""
+    current = "measuring"
+    try:
         current = "measuring"
         _set_step(db, audit, "measuring")
         try:
@@ -789,31 +871,67 @@ def run_audit(db: Session, audit_id: str) -> str:
         )
         audit.email_subject = email["subject"]
         audit.email_html = email["html"]
-        _set_step(db, audit, "ready")
-        log.info("audit_ready", score=audit.overall_score, pdf_bytes=audit.pdf_size)
-    except Exception as exc:  # every failure is recorded on the audit
-        db.rollback()
-        audit = db.get(WebsiteAudit, audit_id)
-        if isinstance(exc, (AuditStopped, AICancelledError)) or _stop_requested(db, audit_id):
-            # Stopped by the user: cancel_audit already recorded it; just clean up.
-            if audit.status != "cancelled":
-                audit.failed_step = current
-                audit.status, audit.step, audit.auto_send = "cancelled", STEP_LABELS["cancelled"], False
-                db.commit()
-            _stop_requests.discard(audit_id)
-            shutil.rmtree(shots_dir, ignore_errors=True)
-            log.info("audit_stopped", step=current)
-            return "cancelled"
-        audit.status = "failed"
-        audit.failed_step = current
-        audit.step = STEP_LABELS["failed"]
-        audit.error_message = _friendly_error(exc)
-        db.commit()
-        log.error("audit_failed", step=current, error=str(exc), error_type=exc.__class__.__name__)
-        shutil.rmtree(shots_dir, ignore_errors=True)
-        _sync_campaign(db, audit)
-        return "failed"
+    except Exception as exc:
+        try:
+            exc.audit_step = current
+        except Exception:  # exceptions without attributes keep the last known step
+            pass
+        raise
 
+
+def _draft_agency_email(db: Session, audit: WebsiteAudit, lead: Lead, site: dict) -> None:
+    """Claude writes the white-label pitch from the agency's site and your offer notes; the PDF is your profile."""
+    from app.services.agency import generate_agency_email, pitch_notes, profile_attachment
+
+    profile = profile_attachment(db, audit.user_id)
+    if not profile:
+        raise AgencySetupError("Upload your company profile PDF in Agency outreach, then run it again.")
+    notes = pitch_notes(db, audit.user_id)
+    if not notes:
+        raise AgencySetupError('Fill in "What you offer agencies" in Agency outreach, then run it again.')
+    config = resolve_ai_config(db, audit.user_id)
+    provider = get_ai_provider_for_user(db, audit.user_id)
+    audit.ai_provider, audit.ai_model = config.provider, config.model
+    portfolio_sites = portfolio_for_prompt(db, audit.user_id)
+    email = generate_agency_email(
+        provider,
+        lead=_lead_info(lead) | {"website_url": audit.website_url},
+        site=site,
+        sender=_sender_info(db, audit.user_id, audit),
+        notes=notes,
+        portfolio=portfolio_sites,
+        timeout=get_settings().audit_ai_timeout_seconds,
+    )
+    # reference_sites: the portfolio links stay real URLs (never click-tracked), as in audit emails
+    audit.report = {
+        "kind": "agency",
+        "reference_sites": keep_known(email["reference_sites"], portfolio_sites),
+        "links": email.get("links") or [],  # your "Links" (partner profile, website): real URLs, never click-tracked
+    }
+    audit.email_subject, audit.email_html = email["subject"], email["html"]
+    audit.pdf_data = None  # your current profile is attached at send time (see email_attachment)
+    audit.pdf_filename, audit.pdf_size = profile[1], len(profile[0])
+    audit.generated_at = datetime.now(UTC)
+
+
+class AgencySetupError(RuntimeError):
+    """Agency outreach is missing your company profile or offer notes."""
+
+
+def email_attachment(db: Session, audit: WebsiteAudit) -> tuple[bytes, str] | None:
+    """The PDF that goes with this email: the audit PDF, or for an agency pitch your current company profile."""
+    if audit.kind == "agency":
+        from app.services.agency import profile_attachment
+
+        return profile_attachment(db, audit.user_id)
+    if not audit.pdf_data:
+        return None
+    return audit.pdf_data, audit.pdf_filename or "website-audit.pdf"
+
+
+def _after_ready(db: Session, audit: WebsiteAudit, log) -> str:
+    """Ready: held by a paused / stopped file or campaign, sent now (automatic), or left for you to review."""
+    audit_id = audit.id
     hold = _campaign_hold(db, audit) if audit.auto_send else ""
     if hold:
         from app.services.campaigns import CAMPAIGN_PAUSED_STEP, CAMPAIGN_STOPPED_STEP
@@ -844,7 +962,9 @@ def run_audit(db: Session, audit_id: str) -> str:
 def _portfolio_links(audit: WebsiteAudit) -> list[str]:
     """Reference-site links stay real, visible URLs (never routed through click tracking)."""
     links = []
-    for item in (audit.report or {}).get("reference_sites") or []:
+    items = list((audit.report or {}).get("reference_sites") or [])
+    items += [{"url": u} for u in (audit.report or {}).get("links") or []]
+    for item in items:
         url = str(item.get("url") or "").rstrip("/")
         if url:
             links += [url, url.replace("https://", "http://", 1), url.replace("://", "://www.", 1)]
@@ -880,7 +1000,7 @@ def _friendly_error(exc: Exception) -> str:
             "AI is not configured. In AI & settings choose Claude Code (your subscription) or add an API key, "
             "then run the audit again."
         )
-    if isinstance(exc, (AIProviderError, PerformanceError)):
+    if isinstance(exc, (AIProviderError, PerformanceError, AgencySetupError)):
         return str(exc)
     return f"Unexpected error ({exc.__class__.__name__}). Check the API/worker logs for details."
 
@@ -898,6 +1018,12 @@ def _require_report(db: Session, audit: WebsiteAudit) -> None:
 def regenerate_pdf(db: Session, user_id: str, audit_id: str, meta: dict | None = None) -> WebsiteAudit:
     """Rebuild the PDF from the stored report, measurements and screenshots (e.g. after changing sender details)."""
     audit = get_audit(db, user_id, audit_id)
+    if audit.kind == "agency":
+        raise HTTPException(
+            status_code=400,
+            detail="Agency emails attach your company profile PDF. Replace it in Agency outreach; every email sent "
+            "after that uses the new one.",
+        )
     _require_report(db, audit)
     lead = db.get(Lead, audit.lead_id)
     if not lead:
@@ -940,6 +1066,11 @@ def redraft_email(db: Session, audit_id: str) -> str:
     try:
         if not lead:
             raise HTTPException(status_code=404, detail="The lead was deleted.")
+        if audit.kind == "agency":
+            _draft_agency_email(db, audit, lead, audit.site_data or {})
+            _set_step(db, audit, "ready")
+            log.info("agency_email_redrafted")
+            return "ready"
         sender = _sender_info(db, audit.user_id, audit)
         if not audit.pdf_data:
             _build_pdf(audit, lead, sender, _saved_screenshots(audit.id))
@@ -1173,16 +1304,19 @@ def send_audit(
         except Exception as exc:  # the earlier PDF still goes out
             db.rollback()
             logger.warning("pdf_rebuild_failed", audit_id=audit.id, error=str(exc)[:200])
-    pdf = audit.pdf_data
-    if not pdf:
+    attachment = email_attachment(db, audit)
+    if not attachment:
+        if audit.kind == "agency":
+            raise HTTPException(status_code=400, detail="Upload your company profile PDF in Agency outreach first.")
         raise HTTPException(status_code=400, detail="The PDF audit is missing. Run the audit again.")
+    pdf, attachment_name = attachment
     if lead and lead.do_not_contact:
         raise HTTPException(status_code=400, detail="This lead is marked do not contact.")
     settings = db.query(UserSettings).filter(UserSettings.user_id == user_id).first()
     if (not settings or settings.respect_suppression_list) and is_suppressed(db, user_id, recipient):
         raise HTTPException(status_code=400, detail="This address is on your suppression list (unsubscribed).")
 
-    from app.services.email_verification import verification_problem
+    from app.services.email_verification import confirmed_cc, verification_problem
 
     # Checked again right before sending (the address may have been chosen before today's rules, or by hand):
     # never send to an address that would bounce or a risky type that isn't confirmed
@@ -1200,6 +1334,9 @@ def send_audit(
     if not problem and not local.low_risk:
         problem = local.reason
     problem = problem or (verification_problem(db, user_id, lead, recipient) if lead else "")
+    if problem.startswith(address_check.RETRY_LATER) and not manual:
+        # The verification service can't check right now: waits, like the sending hours, and is checked again
+        raise deliverability.SendDeferred(problem, f"Waiting: {problem}")
     if problem:
         if not manual:
             audit.auto_send = False  # held for you: choose another address on the lead, then send
@@ -1212,6 +1349,7 @@ def send_audit(
             db.commit()
         raise HTTPException(status_code=400, detail=problem)
     cc = address_check.low_risk_only(db, user_id, cc)  # CC'd colleagues too: one that doesn't pass is left out
+    cc = confirmed_cc(db, user_id, lead, cc)
     if not manual:
         # The file's / campaign's own schedule in the lead's time zone, else your sending hours
         deliverability.require_send_time(db, user_id, audit_schedule(db, audit), lead)
@@ -1306,7 +1444,7 @@ def send_audit(
                 else html_body
             ),
             text_body=text_body,
-            attachments=[EmailAttachment(filename=audit.pdf_filename or "website-audit.pdf", content=pdf)],
+            attachments=[EmailAttachment(filename=attachment_name, content=pdf)],
             headers={"Message-ID": rfc_message_id},  # no bulk-mail headers: 1-to-1 email, not a list
             cc=cc,
         )
@@ -1348,9 +1486,10 @@ def send_audit(
 
 def get_pdf(db: Session, user_id: str, audit_id: str) -> tuple[bytes, str]:
     audit = get_audit(db, user_id, audit_id)
-    if not audit.pdf_data:
+    attachment = email_attachment(db, audit)
+    if not attachment:
         raise HTTPException(status_code=404, detail="No PDF for this audit yet.")
-    return audit.pdf_data, audit.pdf_filename or "website-audit.pdf"
+    return attachment
 
 
 def lead_for_quick_audit(db: Session, user_id: str, data, meta: dict | None = None) -> Lead:

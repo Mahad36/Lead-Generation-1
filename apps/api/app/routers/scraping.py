@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -11,8 +11,12 @@ router = APIRouter(prefix="/scraping/jobs", tags=["scraping"])
 
 
 @router.get("", response_model=list[ScrapingJobOut])
-def list_jobs(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    return [scraping_service.serialize_job(db, job) for job in scraping_service.list_jobs(db, user.id)]
+def list_jobs(
+    purpose: str | None = Query(default=None, pattern="^(audit|agency)$"),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return [scraping_service.serialize_job(db, job) for job in scraping_service.list_jobs(db, user.id, purpose)]
 
 
 @router.post("", response_model=ScrapingJobOut)

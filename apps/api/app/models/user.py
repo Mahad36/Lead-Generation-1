@@ -1,8 +1,8 @@
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, LargeBinary, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB, UUID
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.orm import Mapped, deferred, mapped_column, relationship
 
 from app.database import Base
 from app.models.mixins import TimestampMixin, UUIDPrimaryKeyMixin
@@ -59,10 +59,16 @@ class UserSettings(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     # Google Sheet of sites you built ("Anyone with the link"): one is referenced in every email by niche
     portfolio_sheet_url: Mapped[str] = mapped_column(Text, default="", nullable=False)
     contact_email: Mapped[str] = mapped_column(String(320), default="", nullable=False)
+    # Agency outreach: what you offer agencies (white-label), and your company profile PDF attached to each pitch
+    agency_pitch: Mapped[str] = mapped_column(Text, default="", server_default="", nullable=False)
+    agency_profile_filename: Mapped[str] = mapped_column(String(255), default="", server_default="", nullable=False)
+    agency_profile_pdf: Mapped[bytes | None] = deferred(mapped_column(LargeBinary, nullable=True))
     contact_phone: Mapped[str] = mapped_column(String(64), default="", nullable=False)
     # Deliverability (all on by default): follow-ups, sending hours, address checks, warm-up
     followups_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     followup_days: Mapped[str] = mapped_column(String(64), default="3,5", nullable=False)  # days after the previous email
+    # Follow up only leads who opened an email of the thread (needs open tracking; otherwise everyone)
+    followups_opened_only: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     send_window_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     send_window_start: Mapped[int] = mapped_column(Integer, default=8, nullable=False)  # local hour
     send_window_end: Mapped[int] = mapped_column(Integer, default=19, nullable=False)

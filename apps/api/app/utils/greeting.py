@@ -2,13 +2,15 @@
 otherwise "Hi there,". Never the business name ("Hi ABC Plumbing,") and never "Hi team".
 
 The name comes from, in order: the contact the email is addressed to (found on the website with their name),
-an owner / founder / director named on the website, the lead's contact name. Anything that doesn't look like a
-person's first name (a business word, the business's own name, an initial) is ignored.
+an owner / founder / director named on the website, the lead's contact name. A name found on a website counts only
+if its address matches it (sarah@ for "Sarah Lee"). Anything that doesn't look like a person's first name (a business
+word, the business's own name, an initial) is ignored.
 """
 
 from __future__ import annotations
 
 import re
+import unicodedata
 
 NOT_FIRST_NAMES = {
     "info", "team", "office", "sales", "the", "contact", "admin", "customer", "service", "services", "support",
@@ -36,23 +38,49 @@ def clean_first_name(name: str | None, business_name: str = "") -> str:
     return first[0].upper() + first[1:]
 
 
+def _plain(text: str) -> str:
+    """"José" -> "jose": for comparing a name with an email address."""
+    return unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode().lower()
+
+
+def _name_matches_address(full_name: str, email: str) -> bool:
+    """The address itself backs up a name found on a website: sarah@, sarah.lee@, sarahlee@ or slee@ for "Sarah Lee".
+    Text scraped next to an address is often a city, street or button ("New York", "Water Street", "Submit Thanks")."""
+    from app.services.contacts import GENERIC
+
+    local = _plain(email.split("@", 1)[0])
+    parts = [p for p in re.split(r"[._+-]", local) if p]
+    words = [_plain(w).strip("'’-") for w in re.findall(r"[A-Za-zÀ-ÿ'’-]+", full_name or "")]
+    if not parts or not words or local in GENERIC or parts[0] in GENERIC:
+        return False
+    first = words[0]
+    if first in parts or (len(first) >= 4 and local.startswith(first)):
+        return True
+    return len(words) > 1 and local == first[:1] + words[1]
+
+
 def owner_first_name(lead, recipient_email: str | None = None) -> str:
-    """The first name to greet for this lead's email ("" = greet with "Hi there,")."""
+    """The first name to greet for this lead's email ("" = greet with "Hi there,"). Names scraped from a website count
+    only when their own address backs them up; a wrong name is far worse than "Hi there,"."""
     if lead is None:
         return ""
     business = lead.business_name or ""
     emails = list(getattr(lead, "emails", None) or [])
     recipient = (recipient_email or getattr(lead, "primary_email", "") or "").lower()
+    place = {_plain(w) for w in re.findall(r"[A-Za-zÀ-ÿ'’-]+", f"{getattr(lead, 'city', '')} {getattr(lead, 'address', '')}")}
+
+    def scraped_name(row) -> str:
+        if not row.contact_name or not _name_matches_address(row.contact_name, row.email):
+            return ""
+        name = clean_first_name(row.contact_name, business)
+        return "" if _plain(name) in place else name  # a branch mailbox: stillorgan@ "Stillorgan Shopping Centre"
+
     for row in emails:  # the person the email actually goes to
-        if row.email.lower() == recipient and row.contact_name:
-            name = clean_first_name(row.contact_name, business)
-            if name:
-                return name
+        if row.email.lower() == recipient and (name := scraped_name(row)):
+            return name
     for row in emails:  # an owner / founder / director named on the website
-        if row.contact_name and any(s in (row.job_title or "").lower() for s in SENIOR):
-            name = clean_first_name(row.contact_name, business)
-            if name:
-                return name
+        if any(s in (row.job_title or "").lower() for s in SENIOR) and (name := scraped_name(row)):
+            return name
     return clean_first_name(getattr(lead, "contact_name", ""), business)
 
 

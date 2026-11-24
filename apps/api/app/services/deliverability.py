@@ -185,13 +185,16 @@ def require_send_gap(db: Session, account: EmailAccount) -> None:
 
 def check_bounce_rate(db: Session, account: EmailAccount) -> bool:
     """Pause the inbox when too many of its recent emails bounced. Returns True when it was paused now."""
+    from app.services.account_health import fresh_start_of
+
     if account.paused_reason:
         return False
+    start = fresh_start_of(account)
     recent = (
         db.query(EmailMessage.bounced_at)
         .filter(
             EmailMessage.email_account_id == account.id,
-            EmailMessage.sent_at.isnot(None),
+            EmailMessage.sent_at.isnot(None) if start is None else EmailMessage.sent_at >= start,
             EmailMessage.is_test.is_(False),
         )
         .order_by(EmailMessage.sent_at.desc())

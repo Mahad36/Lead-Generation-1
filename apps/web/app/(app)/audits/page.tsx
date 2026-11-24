@@ -19,6 +19,12 @@ function platformLabel(platform?: string) {
   return !name || /^(unknown|none|custom\/unknown)$/i.test(name) ? "—" : name;
 }
 
+type AuditView = "main" | "not_sent";
+const AUDIT_VIEWS: { id: AuditView; label: string }[] = [
+  { id: "main", label: "Audits" },
+  { id: "not_sent", label: "Not sent" },
+];
+
 const EMPTY_FORM = { business_name: "", website_url: "", email: "", city: "", category: "", auto_send: false, email_account_id: "" };
 
 export default function WebsiteAuditsPage() {
@@ -34,17 +40,23 @@ export default function WebsiteAuditsPage() {
   const [platform, setPlatform] = useState("");
   const [findingType, setFindingType] = useState("");
   const [platforms, setPlatforms] = useState<{ platform: string; count: number }[]>([]);
-  const loadList = useCallback(
-    () =>
-      api<{ items: Audit[]; total: number }>(
-        `/api/audits?page=${page}&page_size=${PAGE_SIZE}${search ? `&q=${encodeURIComponent(search)}` : ""}` +
-          `${platform ? `&platform=${encodeURIComponent(platform)}` : ""}${findingType ? `&finding_type=${findingType}` : ""}`
-      ).then((data) => {
-        setAudits(data.items);
-        setTotal(data.total);
-      }),
-    [search, page, platform, findingType]
-  );
+  // "main": audits that were sent or are on their way; "not_sent": failed audits and emails that didn't go out
+  const [view, setView] = useState<AuditView>("main");
+  const [counts, setCounts] = useState<Record<AuditView, number | null>>({ main: null, not_sent: null });
+  const loadList = useCallback(() => {
+    const filters =
+      `${search ? `&q=${encodeURIComponent(search)}` : ""}` +
+      `${platform ? `&platform=${encodeURIComponent(platform)}` : ""}${findingType ? `&finding_type=${findingType}` : ""}`;
+    const other: AuditView = view === "main" ? "not_sent" : "main";
+    return Promise.all([
+      api<{ items: Audit[]; total: number }>(`/api/audits?kind=audit&view=${view}&page=${page}&page_size=${PAGE_SIZE}${filters}`),
+      api<{ total: number }>(`/api/audits?kind=audit&view=${other}&page=1&page_size=1${filters}`).catch(() => null),
+    ]).then(([data, otherData]) => {
+      setAudits(data.items);
+      setTotal(data.total);
+      setCounts({ [view]: data.total, [other]: otherData ? otherData.total : null } as Record<AuditView, number | null>);
+    });
+  }, [search, page, platform, findingType, view]);
 
   useEffect(() => {
     api<{ platform: string; count: number }[]>("/api/audits/platforms")
@@ -159,9 +171,36 @@ export default function WebsiteAuditsPage() {
 
       <Card>
         <OlderAuditsUpdate onDone={() => loadList().catch(() => undefined)} />
+        <div className="mb-3 flex gap-1 border-b border-border" role="tablist" aria-label="Audit lists">
+          {AUDIT_VIEWS.map((v) => (
+            <button
+              key={v.id}
+              type="button"
+              role="tab"
+              aria-selected={view === v.id}
+              className={
+                "-mb-px border-b-2 px-3 py-2 text-sm " +
+                (view === v.id ? "border-primary font-medium text-foreground" : "border-transparent text-muted hover:text-foreground")
+              }
+              onClick={() => {
+                setView(v.id);
+                setPage(1);
+              }}
+            >
+              {v.label}
+              {counts[v.id] !== null ? <span className="ml-1 text-xs text-muted">({counts[v.id]})</span> : null}
+            </button>
+          ))}
+        </div>
+        {view === "not_sent" ? (
+          <p className="mb-3 text-sm text-muted">
+            Audits that failed, and audit emails that weren&apos;t sent: the campaign was stopped, the address may bounce,
+            or sending failed. Open one to choose another address or send it yourself.
+          </p>
+        ) : null}
         <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
           <div className="flex flex-wrap items-center gap-2">
-            <h2 className="font-medium">Recent audits</h2>
+            <h2 className="font-medium">{view === "main" ? "Recent audits" : "Not sent"}</h2>
             <select
               className="rounded-md border border-border bg-card px-2 py-1 text-sm"
               value={platform}
@@ -277,6 +316,8 @@ export default function WebsiteAuditsPage() {
         ) : (
           search || platform || findingType ? (
             <Empty title="No audits match these filters" hint="Try another platform, finding type or search." />
+          ) : view === "not_sent" ? (
+            <Empty title="Nothing here" hint="Failed audits and emails that weren't sent will show in this tab." />
           ) : (
             <Empty title="No audits yet" hint="Run your first audit with the form above." />
           )

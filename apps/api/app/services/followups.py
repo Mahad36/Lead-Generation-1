@@ -5,6 +5,8 @@ After each first email (audit email or campaign email) that has `followups_enabl
 thread (In-Reply-To / References), without the PDF. Claude writes each one from the first email; a plain template
 is used if the AI is unavailable. They stop for good as soon as the lead replies, bounces, unsubscribes or is marked
 do-not-contact, when its campaign's follow-ups are switched off, or after the last step (followups_done_at is set).
+With "opened only" (Settings, on by default) a thread waits until the lead opens one of its emails, and ends without
+follow-ups if nothing is opened before the whole schedule has passed (3 + 5 = 8 days for "3,5").
 Stopping a campaign / scrape file only stops new first emails; threads already started keep their follow-ups.
 Paused campaigns / files, sending hours, paused inboxes and their own daily allowance only delay them. From an inbox
 at full health they don't count towards your daily limit (send_protection.counts_followups).
@@ -187,6 +189,7 @@ def _write_body(
     thread = _thread(db, root)
     _, _, audit = _origin(db, root)
     report = (audit.report or {}) if audit else {}
+    agency = bool(audit and audit.kind == "agency")  # a white-label pitch to an agency, not a website audit
     payload = {
         "follow_up_number": step,
         "total_follow_ups": steps,
@@ -199,20 +202,24 @@ def _write_body(
         },
         "first_email": root.text_body[:3000],
         "earlier_follow_ups": [m.text_body[:800] for m in thread[1:]],
-        "audit_highlights": {
-            "headline": report.get("headline", ""),
-            "top_findings": [f.get("title", "") for f in (report.get("findings") or [])[:4]],
-            "free_offer": report.get("free_offer") or {},
-        },
         "sender": {"name": sender, "company": settings.company_name if settings else ""},
         "signature_added": signature_added,
     }
+    if not agency:
+        payload["audit_highlights"] = {
+            "headline": report.get("headline", ""),
+            "top_findings": [f.get("title", "") for f in (report.get("findings") or [])[:4]],
+            "free_offer": report.get("free_offer") or {},
+        }
+    from app.services import agency as agency_service
+
+    system = (agency_service.FOLLOWUP_SYSTEM if agency else FOLLOWUP_SYSTEM).format(style=HUMAN_STYLE)
     try:
         provider = get_ai_provider_for_user(db, root.user_id)
         text = provider.generate(
             "Write follow-up email number "
             f"{step} of {steps}. Return JSON only.\n\n" + json.dumps(payload, ensure_ascii=False, default=str),
-            system=FOLLOWUP_SYSTEM.format(style=HUMAN_STYLE),
+            system=system,
             temperature=0.5,
             max_tokens=1200,
             json_schema=FOLLOWUP_SCHEMA,
@@ -225,6 +232,10 @@ def _write_body(
         logger.warning("followup_ai_bad_length", root_id=root.id, words=len(body.split()))
     except Exception as exc:  # AI not set up / busy / failed: the plain version still goes out
         logger.warning("followup_ai_failed", root_id=root.id, error=str(exc)[:200])
+    if agency:
+        return agency_service.fallback_followup(
+            step, steps, _first_name(lead, root), lead.business_name if lead else "", signature_added, sender
+        )
     return _fallback_body(step, steps, lead, root, signature_added, sender)
 
 
@@ -381,9 +392,24 @@ def due_followups(db: Session, user_id: str | None = None) -> list[tuple[EmailMe
             if reason:
                 logger.info("followups_stopped", root_id=root.id, reason=reason)
             continue
+        if waits_for_open(settings, thread):
+            # Not opened yet: it waits (it goes out once opened); it ends once the whole schedule has passed
+            if root.sent_at + timedelta(days=sum(days)) <= now:
+                root.followups_done_at = now
+                db.commit()
+                logger.info("followups_stopped", root_id=root.id, reason="never opened")
+            continue
         if thread[-1].sent_at + timedelta(days=days[step - 1]) <= now:
             due.append((root, step, len(days)))
     return due
+
+
+def waits_for_open(settings: UserSettings | None, thread: list[EmailMessage]) -> bool:
+    """Follow-ups for opened emails only (Settings): nobody in the thread has opened an email yet. Ignored when open
+    tracking is off, since then no open is ever recorded."""
+    if settings is None or not getattr(settings, "followups_opened_only", False) or not settings.track_opens:
+        return False
+    return not any((m.open_count or 0) > 0 or m.opened_at for m in thread)
 
 
 def run_followups(db: Session) -> dict:
@@ -435,6 +461,7 @@ def followup_summary(db: Session, root: EmailMessage) -> dict:
         "total": len(days),
         "done": bool(root.followups_done_at),
         "next_at": next_at,
+        "waiting_for_open": bool(next_at) and waits_for_open(settings, thread),
     }
 
 

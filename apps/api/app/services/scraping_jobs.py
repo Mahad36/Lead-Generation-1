@@ -64,6 +64,7 @@ def create_job(db: Session, user_id: str, data: ScrapingJobCreate) -> ScrapingJo
     job = ScrapingJob(
         user_id=user_id,
         name=name,
+        purpose=data.purpose,
         status="draft",
         max_results_per_search=max_results,
         extra={
@@ -137,6 +138,7 @@ def serialize_job(db: Session, job: ScrapingJob) -> dict:
     return {
         "id": job.id,
         "name": job.name,
+        "purpose": job.purpose or "audit",
         "status": job.status,
         "max_results_per_search": job.max_results_per_search,
         "businesses_found": job.businesses_found,
@@ -163,14 +165,11 @@ def serialize_job(db: Session, job: ScrapingJob) -> dict:
     }
 
 
-def list_jobs(db: Session, user_id: str) -> list[ScrapingJob]:
-    return (
-        db.query(ScrapingJob)
-        .options(joinedload(ScrapingJob.searches))
-        .filter(ScrapingJob.user_id == user_id)
-        .order_by(ScrapingJob.created_at.desc())
-        .all()
-    )
+def list_jobs(db: Session, user_id: str, purpose: str | None = None) -> list[ScrapingJob]:
+    query = db.query(ScrapingJob).options(joinedload(ScrapingJob.searches)).filter(ScrapingJob.user_id == user_id)
+    if purpose:
+        query = query.filter(ScrapingJob.purpose == purpose)
+    return query.order_by(ScrapingJob.created_at.desc()).all()
 
 
 def set_job_status(db: Session, user_id: str, job_id: str, status: str, meta: dict | None = None) -> ScrapingJob:

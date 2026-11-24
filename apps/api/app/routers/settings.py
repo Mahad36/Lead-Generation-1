@@ -1,4 +1,6 @@
-from fastapi import APIRouter, Depends, HTTPException, Request
+import re
+
+from fastapi import APIRouter, Depends, File, HTTPException, Request, Response, UploadFile
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -17,6 +19,8 @@ from app.services.integrations import (
     resolve_apify_token,
     resolve_scraper_provider,
 )
+from app.services.agency import PROFILE_MAX_BYTES as AGENCY_PROFILE_MAX_BYTES
+from app.services.agency import profile_size as agency_profile_size
 from app.services.limits import LimitValidationError, validate_send_limits
 from app.utils.crypto import encrypt_text
 
@@ -31,6 +35,7 @@ _SKIP_COLUMNS = {
     "encrypted_google_client_secret",
     "encrypted_apify_token",
     "encrypted_email_verifier_key",
+    "agency_profile_pdf",  # served by /settings/agency-profile, never in the settings payload
 }
 _SECRET_FIELDS = {"ai_api_key", "google_client_secret", "apify_token", "email_verifier_key"}
 
@@ -67,7 +72,57 @@ def _payload(db: Session, user: User) -> dict:
     data["google_redirect_uri"] = app.google_redirect_uri
     data["google_redirect_uris"] = suggested_redirect_uris()
     data["services"] = settings.user.services if settings.user else user.services
+    data["agency_profile_size"] = agency_profile_size(db, user.id)
     return data
+
+
+@router.post("/agency-profile")
+async def upload_agency_profile(
+    request: Request,
+    file: UploadFile = File(...),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Your company profile PDF, attached to every agency pitch (Agency outreach)."""
+    content = await file.read(AGENCY_PROFILE_MAX_BYTES + 1)
+    if len(content) > AGENCY_PROFILE_MAX_BYTES:
+        raise HTTPException(status_code=400, detail="The PDF is larger than 10 MB. Compress it and upload it again.")
+    if not content.startswith(b"%PDF"):
+        raise HTTPException(status_code=400, detail="Upload a PDF file.")
+    settings = db.query(UserSettings).filter(UserSettings.user_id == user.id).first()
+    if not settings:
+        settings = UserSettings(user_id=user.id)
+        db.add(settings)
+    name = re.sub(r"[^\w .()-]", "", (file.filename or "").replace("\\", "/").rsplit("/", 1)[-1]).strip()[:255]
+    settings.agency_profile_pdf = content
+    settings.agency_profile_filename = name if name.lower().endswith(".pdf") else f"{name or 'company-profile'}.pdf"
+    write_audit(db, user_id=user.id, action="settings.agency_profile_uploaded", entity_type="user_settings",
+                entity_id=settings.id, details={"bytes": len(content)}, **get_client_meta(request))
+    db.commit()
+    return {"filename": settings.agency_profile_filename, "size": len(content)}
+
+
+@router.get("/agency-profile")
+def download_agency_profile(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    settings = db.query(UserSettings).filter(UserSettings.user_id == user.id).first()
+    if not settings or not settings.agency_profile_pdf:
+        raise HTTPException(status_code=404, detail="No company profile uploaded yet.")
+    return Response(
+        content=settings.agency_profile_pdf,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'inline; filename="{settings.agency_profile_filename or "company-profile.pdf"}"'},
+    )
+
+
+@router.delete("/agency-profile")
+def delete_agency_profile(request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    settings = db.query(UserSettings).filter(UserSettings.user_id == user.id).first()
+    if settings:
+        settings.agency_profile_pdf, settings.agency_profile_filename = None, ""
+        write_audit(db, user_id=user.id, action="settings.agency_profile_removed", entity_type="user_settings",
+                    entity_id=settings.id, details={}, **get_client_meta(request))
+        db.commit()
+    return {"ok": True}
 
 
 @router.get("/ai-providers")

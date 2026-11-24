@@ -250,6 +250,7 @@ export function SchedulePicker({
   showStartAt = true,
   windowLabel,
   onCountryChange,
+  agency = false,
 }: {
   country: string;
   areas: string[];
@@ -258,6 +259,7 @@ export function SchedulePicker({
   showStartAt?: boolean;
   windowLabel?: string; // your sending hours from settings, e.g. "17:00-02:00, Mon-Fri"
   onCountryChange?: (country: string) => void; // set: a country choice for the suggestions (campaigns)
+  agency?: boolean; // Agency outreach: pitches, not audits
 }) {
   const [plan, setPlan] = useState<Plan | null>(null);
   const areasKey = areas.join("|");
@@ -414,9 +416,11 @@ export function SchedulePicker({
       ) : null}
       <p className="text-xs text-muted">
         {value.mode === "now"
-          ? "Each email goes out as soon as its audit is ready, at any hour. Daily limits and 2 minutes between emails still apply."
+          ? `Each email goes out as soon as its ${agency ? "pitch" : "audit"} is ready, at any hour. Daily limits and 2 minutes between emails still apply.`
           : value.mode === "slots"
           ? "Emails only go out inside the dates and times above; whatever isn't sent in one window waits for the next. If every date has passed, emails wait until you add a new one."
+          : agency
+          ? "Agencies are still found and their pitches written straight away; the emails wait until the schedule opens."
           : "Leads are still found and audited straight away; their emails wait until the schedule opens."}{" "}
         Follow-ups use the same schedule.
       </p>

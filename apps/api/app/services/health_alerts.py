@@ -196,19 +196,26 @@ def inbox_alerts(db: Session, account: EmailAccount, policy: str = "strict") -> 
 DOMAIN_BOUNCE_WARN, DOMAIN_BOUNCE_CRITICAL, DOMAIN_BOUNCE_MIN = 0.02, 0.05, 20
 
 
-def domain_bounce_stats(db: Session, accounts: list[EmailAccount]) -> dict:
-    """Emails sent from all of a domain's inboxes in the last 30 days, and how many bounced."""
-    since = datetime.now(UTC) - timedelta(days=30)
-    sent, bounced = (
-        db.query(func.count(EmailMessage.id), func.count(EmailMessage.bounced_at))
-        .filter(
-            EmailMessage.email_account_id.in_([a.id for a in accounts]),
-            EmailMessage.sent_at >= since,
-            EmailMessage.is_test.is_(False),
+def domain_bounce_stats(db: Session, accounts: list[EmailAccount], fresh: bool = False) -> dict:
+    """Emails sent from all of a domain's inboxes in the last 30 days, and how many bounced. fresh: for the warning,
+    each inbox counts only since its fresh start (account_health.start_fresh); the overview always shows everything."""
+    from app.services.account_health import fresh_start_of
+
+    month_ago = datetime.now(UTC) - timedelta(days=30)
+    total_sent = total_bounced = 0
+    for account in accounts:
+        start = fresh_start_of(account) if fresh else None
+        sent, bounced = (
+            db.query(func.count(EmailMessage.id), func.count(EmailMessage.bounced_at))
+            .filter(
+                EmailMessage.email_account_id == account.id,
+                EmailMessage.sent_at >= max(month_ago, start or month_ago),
+                EmailMessage.is_test.is_(False),
+            )
+            .one()
         )
-        .one()
-    )
-    return {"sent": sent or 0, "bounced": bounced or 0, "rate": (bounced or 0) / sent if sent else 0.0}
+        total_sent, total_bounced = total_sent + (sent or 0), total_bounced + (bounced or 0)
+    return {"sent": total_sent, "bounced": total_bounced, "rate": total_bounced / total_sent if total_sent else 0.0}
 
 
 def domain_overview(db: Session, user_id: str) -> list[dict]:
@@ -300,7 +307,7 @@ def domain_alerts(db: Session, domain: str, accounts: list[EmailAccount], force:
             ))
 
     keys.add(f"domain_bounces:{domain}")
-    stats = domain_bounce_stats(db, accounts)
+    stats = domain_bounce_stats(db, accounts, fresh=True)
     if stats["sent"] >= DOMAIN_BOUNCE_MIN and stats["rate"] >= DOMAIN_BOUNCE_WARN:
         found.append(_alert(
             f"domain_bounces:{domain}", "domain_bounces",

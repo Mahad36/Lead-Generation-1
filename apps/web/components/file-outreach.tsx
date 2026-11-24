@@ -28,6 +28,8 @@ export type FileOutreach = {
   email_account: string;
   email_account_issue: string;
   audit_hold?: string; // audits paused: today's emails can't go out (saves Claude tokens)
+  purpose?: "audit" | "agency"; // agency: white-label pitches (Agency outreach), no audits
+  issues?: string[]; // what an agency file still needs (company profile, offer notes)
 };
 
 export type OutreachMode = "auto" | "review" | "off";
@@ -59,17 +61,25 @@ export function OutreachModePicker({
   limit,
   onMode,
   onLimit,
+  agency = false,
 }: {
   mode: OutreachMode;
   limit: number;
   onMode: (mode: OutreachMode) => void;
   onLimit: (limit: number) => void;
+  agency?: boolean; // Agency outreach: pitches with your company profile, no audits
 }) {
-  const options: [OutreachMode, string, string][] = [
-    ["auto", "Audit and send automatically", "Each lead with a website and email is audited and emailed with its PDF."],
-    ["review", "Audit automatically, I review", "Audits and emails are prepared; you send them from the lead page."],
-    ["off", "Off", "Only collect leads. You can start outreach for this file later."],
-  ];
+  const options: [OutreachMode, string, string][] = agency
+    ? [
+        ["auto", "Write and send automatically", "Each agency with a checked email gets its own pitch, with your company profile attached."],
+        ["review", "Write automatically, I review", "Pitches are written; you check and send them from the lead page."],
+        ["off", "Off", "Only collect agencies. You can start outreach for this file later."],
+      ]
+    : [
+        ["auto", "Audit and send automatically", "Each lead with a website and email is audited and emailed with its PDF."],
+        ["review", "Audit automatically, I review", "Audits and emails are prepared; you send them from the lead page."],
+        ["off", "Off", "Only collect leads. You can start outreach for this file later."],
+      ];
   return (
     <div className="space-y-2 rounded-xl border border-border p-3">
       <div className="text-sm font-medium">Automatic outreach for this file</div>
@@ -87,7 +97,7 @@ export function OutreachModePicker({
       {mode !== "off" ? (
         <div className="space-y-1">
           <label className="flex items-center gap-2 text-sm">
-            Max audits per day for this file
+            {agency ? "Max pitches per day for this file" : "Max audits per day for this file"}
             <Input
               className="h-8 w-24 py-1"
               type="number"
@@ -97,11 +107,18 @@ export function OutreachModePicker({
               onChange={(e) => onLimit(Math.max(0, Number(e.target.value) || 0))}
             />
           </label>
-          <p className="text-xs text-muted">
-            Empty = no limit. Audits don&apos;t depend on how many emails your inboxes can send: finished emails wait
-            for an inbox with room. The real limits are your Claude plan&apos;s usage and 2 audits at a time (each one
-            runs Claude and a browser on this PC, about 2-3 minutes).
-          </p>
+          {agency ? (
+            <p className="text-xs text-muted">
+              Empty = no limit. Pitches are only written for emails your inboxes can send today, so the real limit is
+              your inboxes&apos; daily limits (shared with your audit emails). Each pitch takes Claude about a minute.
+            </p>
+          ) : (
+            <p className="text-xs text-muted">
+              Empty = no limit. Audits don&apos;t depend on how many emails your inboxes can send: finished emails wait
+              for an inbox with room. The real limits are your Claude plan&apos;s usage and 2 audits at a time (each one
+              runs Claude and a browser on this PC, about 2-3 minutes).
+            </p>
+          )}
         </div>
       ) : null}
       {mode !== "off" ? <OutreachIssues /> : null}
@@ -128,6 +145,8 @@ export function FileOutreachControls({
   if (!outreach) return null;
   const limit = draft ?? String(outreach.daily_limit);
   const o = outreach;
+  const agency = o.purpose === "agency";
+  const word = agency ? "pitch" : "audit"; // what each lead gets: a white-label pitch or a website audit
 
   async function send(action: string, extra: Record<string, unknown> = {}, message = "") {
     setBusy(true);
@@ -147,7 +166,7 @@ export function FileOutreachControls({
     const value = Math.max(0, Number(limit) || 0);
     setDraft(null);
     if (value !== o.daily_limit)
-      send("update", { daily_limit: value }, value ? `Daily audit limit for this file: ${value}` : "No daily audit limit for this file");
+      send("update", { daily_limit: value }, value ? `Daily ${word} limit for this file: ${value}` : `No daily ${word} limit for this file`);
   }
 
   return (
@@ -156,11 +175,12 @@ export function FileOutreachControls({
       {o.status !== "off" ? (
         <span className="text-xs text-muted">
           {o.audits_today}
-          {o.daily_limit ? `/${o.daily_limit}` : ""} audited today · {o.audited_total ?? 0} audited in total ·{" "}
+          {o.daily_limit ? `/${o.daily_limit}` : ""} {agency ? "written" : "audited"} today · {o.audited_total ?? 0}{" "}
+          {agency ? "written" : "audited"} in total ·{" "}
           {o.sent_total} sent · {o.waiting_to_send ? `${o.waiting_to_send} waiting to send · ` : ""}
           {o.waiting_leads} leads left
           {o.running ? ` · ${o.running} running` : ""}
-          {o.failed_total ? ` · ${o.failed_total} audits failed` : ""}
+          {o.failed_total ? ` · ${o.failed_total} ${word}s failed` : ""}
           {o.send_failed_total ? ` · ${o.send_failed_total} sends failed` : ""}
           {o.auto_send ? "" : " · review mode"}
         </span>
@@ -185,8 +205,8 @@ export function FileOutreachControls({
         </label>
       ) : null}
       {o.failed_total ? (
-        <Button variant="secondary" disabled={busy} onClick={() => send("retry_failed", {}, "Failed audits will be tried again")}>
-          Retry failed audits
+        <Button variant="secondary" disabled={busy} onClick={() => send("retry_failed", {}, `Failed ${word}s will be tried again`)}>
+          Retry failed {word}s
         </Button>
       ) : null}
       <label className="flex items-center gap-1 text-xs text-muted">
@@ -215,7 +235,12 @@ export function FileOutreachControls({
       {o.email_account_issue ? <span className="w-full text-xs text-amber-700 dark:text-amber-300">{o.email_account_issue}</span> : null}
       {o.audit_hold ? (
         <span className="w-full rounded-md bg-amber-50 px-2 py-1 text-xs text-amber-800 dark:bg-amber-950 dark:text-amber-200">
-          Audits paused: {o.audit_hold}
+          {agency ? "Pitches paused" : "Audits paused"}: {o.audit_hold}
+        </span>
+      ) : null}
+      {o.issues?.length ? (
+        <span className="w-full rounded-md bg-amber-50 px-2 py-1 text-xs text-amber-800 dark:bg-amber-950 dark:text-amber-200">
+          No pitches are written yet: {o.issues.join(" ")}
         </span>
       ) : null}
       {o.status === "off" || o.status === "stopped" ? (
@@ -226,7 +251,7 @@ export function FileOutreachControls({
           <Button
             variant="secondary"
             disabled={busy || !o.waiting_leads}
-            onClick={() => send("start", { auto_send: false }, "Audits started; emails wait for your review")}
+            onClick={() => send("start", { auto_send: false }, agency ? "Started; pitches wait for your review" : "Audits started; emails wait for your review")}
           >
             Start (I review)
           </Button>

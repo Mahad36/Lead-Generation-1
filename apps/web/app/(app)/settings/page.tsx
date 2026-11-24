@@ -1,5 +1,6 @@
 "use client";
 
+import { AgencyPitchCard } from "@/components/agency-pitch";
 import { Badge, Button, Card, Input, Label, Textarea } from "@/components/ui";
 import { CheckCircle2 } from "lucide-react";
 import { api } from "@/lib/api";
@@ -146,13 +147,14 @@ function EmailVerification({ s, set }: { s: any; set: (key: string, value: any) 
             </div>
             <p className="pb-2 text-sm">
               This month: <span className="font-medium">{usage.used ?? 0}</span> of {usage.limit ?? s.email_verifier_monthly_limit ?? 100}
-              {usage.exhausted ? " · the service says the allowance is used up; outreach carries on with the free checks" : ""}
+              {usage.exhausted ? " · the service says its credits are used up" : ""}
             </p>
           </div>
           <p className="text-xs text-muted">
-            Only a &ldquo;doesn&apos;t exist&rdquo; answer stops an email. &ldquo;Accepts every address&rdquo; or
-            &ldquo;unknown&rdquo; goes out as before, and when the monthly checks are used up nothing stops: the free
-            checks still apply.
+            Only addresses the service confirms are emailed: &ldquo;doesn&apos;t exist&rdquo;, &ldquo;accepts every
+            address&rdquo; and &ldquo;unknown&rdquo; are skipped. When every lead is checked and the monthly checks or
+            credits run out, new first emails wait, then resume by themselves once checks are available again.
+            Follow-ups carry on, since those addresses were already emailed.
           </p>
         </>
       ) : null}
@@ -209,6 +211,10 @@ export default function SettingsPage() {
       google_redirect_uris,
       apify_configured,
       apify_token_set,
+      // Agency outreach saves its own notes and profile (its tab); never overwritten from here
+      agency_pitch,
+      agency_profile_filename,
+      agency_profile_size,
       ...rest
     } = s;
     const body: Record<string, unknown> = { ...rest };
@@ -241,6 +247,7 @@ export default function SettingsPage() {
     { id: "sending", label: "Sending" },
     { id: "ai", label: "AI setup" },
     { id: "apify", label: "Google Maps leads" },
+    { id: "agency", label: "Agency outreach" },
   ];
 
   return (
@@ -253,6 +260,7 @@ export default function SettingsPage() {
           </Button>
         ))}
       </div>
+      {tab === "agency" ? <AgencyPitchCard /> : null}
       {tab === "workspace" ? (
         <Card className="space-y-3">
           <div><Label>Sender name</Label><Input value={s.sender_name} onChange={(e) => set("sender_name", e.target.value)} /></div>
@@ -504,6 +512,24 @@ export default function SettingsPage() {
                   &quot;3,5&quot; = follow-up 1 three days after the first email, follow-up 2 five days after that. Up to 5.
                 </p>
               </div>
+            ) : null}
+            {s.followups_enabled ? (
+              <label className="ml-6 flex items-start gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  className="mt-1"
+                  checked={s.followups_opened_only ?? true}
+                  onChange={(e) => set("followups_opened_only", e.target.checked)}
+                />
+                <span>
+                  <span className="font-medium">Only leads who opened the email</span>
+                  <span className="block text-xs text-muted">
+                    A follow-up waits until the lead opens the email; if they never open it before the last follow-up
+                    would be due, the thread ends without follow-ups. Opens come from the tracking image, so some real
+                    readers (images blocked) are missed. Needs open tracking on.
+                  </span>
+                </span>
+              </label>
             ) : null}
           </div>
 

@@ -175,7 +175,8 @@ def test_zerobounce_role_based_is_not_a_dead_mailbox(monkeypatch):
         def json(self):
             return self._data
 
-    for sub, expected in (("role_based", "valid"), ("role_based_catch_all", "accept_all"), ("disposable", "invalid")):
+    # role_based isn't dead, but isn't confirmed either (hello@nezevents.com was role_based and bounced)
+    for sub, expected in (("role_based", "unknown"), ("role_based_catch_all", "accept_all"), ("disposable", "invalid")):
         monkeypatch.setattr(ev.httpx, "get", lambda *a, **k: Response({"status": "do_not_mail", "sub_status": sub}))
         assert ev.verify_with("zerobounce", "k", "info@x.com")["status"] == expected, sub
     assert ev.risky_reason("admin@acme.com", "https://acme.com", "Dentist", {})  # admin@ is always checked

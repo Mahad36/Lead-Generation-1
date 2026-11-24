@@ -650,7 +650,6 @@ def build_audit_pdf(
     # Your website (AI & settings -> Company website), shown under "Presented by" on the cover
     company_url = (sender.get("company_website") or "").strip()
     company_site = re.sub(r"^https?://(www\.)?", "", company_url).rstrip("/")
-    contact = _clean(sender.get("contact_email") or "")
     overall = report.get("overall_score")
     offer = report.get("free_offer") or {}
 
@@ -768,9 +767,8 @@ def build_audit_pdf(
         y -= 22
         _pill(canvas, x, y, "HOW TO GET IT", f["label"], 11)
         y -= 32
+        # Replies go to the inbox that sent the report; no separate contact address in the PDF
         claim = "Just reply to the email this report came with. No cost and no obligation."
-        if contact:
-            claim = f"Just reply to the email this report came with, or write to {contact}. No cost and no obligation."
         canvas.setFillColor(colors.white)
         canvas.setFont(f["body"], 12.5)
         for line in _wrap_lines(_clean(claim), f["body"], 12.5, width):

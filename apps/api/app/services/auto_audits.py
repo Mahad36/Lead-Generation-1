@@ -16,12 +16,12 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 from fastapi import HTTPException
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.logging_config import get_logger
-from app.models import Campaign, CampaignLead, EmailAccount, Lead, ScrapingJob, SuppressionEntry, WebsiteAudit
+from app.models import Campaign, CampaignLead, EmailAccount, Lead, ScrapingJob, SuppressionEntry, UserSettings, WebsiteAudit
 from app.services.campaigns import (
     CAMPAIGN_PAUSED_STEP,
     CAMPAIGN_STOPPED_STEP,
@@ -105,12 +105,41 @@ def candidate_leads_query(db: Session, user_id: str, job_id: str | None = None):
     )
     if job_id:
         query = query.filter(Lead.scraping_job_id == job_id)
-    return query.order_by(Lead.created_at.asc())
+    return query.order_by(_send_order(), Lead.created_at.asc())
 
 
-def outreach_issues(db: Session, user_id: str, auto_send: bool = True) -> list[str]:
-    """What stops automatic outreach from working at all (shown next to the outreach controls)."""
+def _send_order():
+    """Already confirmed first (no check needed), then the addresses most likely to be confirmed, so checks aren't spent
+    on shared inboxes first. In your checks: free mail 94% valid, named addresses 81%, info@ / sales@ 0 of 107."""
+    from app.services.contacts import DEPARTMENT_SCORE, GENERIC
+    from app.services.email_verification import WEBMAIL
+
+    address = func.lower(Lead.primary_email)
+    local = func.regexp_replace(func.split_part(address, "@", 1), "[._+-].*$", "")
+    return case(
+        (Lead.email_verification_status == "valid", 0),
+        (func.split_part(address, "@", 2).in_(WEBMAIL), 1),
+        (local.in_(GENERIC | set(DEPARTMENT_SCORE)), 3),
+        else_=2,
+    )
+
+
+def agency_issues(db: Session, user_id: str) -> list[str]:
+    """What an agency file needs before its pitches are written: your company profile PDF and what you offer."""
+    from app.services.agency import profile_size
+
     issues = []
+    if not profile_size(db, user_id):
+        issues.append("Upload your company profile PDF in Agency outreach: it is attached to every pitch.")
+    pitch = db.query(UserSettings.agency_pitch).filter(UserSettings.user_id == user_id).scalar()
+    if not (pitch or "").strip():
+        issues.append("Fill in \"What you offer agencies\" in Agency outreach: Claude writes each pitch from it.")
+    return issues
+
+
+def outreach_issues(db: Session, user_id: str, auto_send: bool = True, purpose: str = "audit") -> list[str]:
+    """What stops automatic outreach from working at all (shown next to the outreach controls)."""
+    issues = agency_issues(db, user_id) if purpose == "agency" else []
     if not ai_is_configured(db, user_id):
         issues.append("AI is not set up: choose Claude Code in AI & settings.")
     if auto_send:
@@ -167,6 +196,8 @@ def job_outreach_status(db: Session, job: ScrapingJob) -> dict:
             WebsiteAudit.created_at >= today, WebsiteAudit.status.in_(["failed", "send_failed"])
         ).count(),
         "waiting_leads": candidate_leads_query(db, job.user_id, job.id).count(),
+        "issues": agency_issues(db, job.user_id) if job.purpose == "agency" else [],
+        "purpose": job.purpose or "audit",
         "poll_seconds": get_settings().auto_audit_poll_seconds,
     }
 
@@ -417,7 +448,7 @@ def _note_hold(db: Session, job: ScrapingJob, reason: str) -> None:
 def poll_job(db: Session, job: ScrapingJob) -> int:
     """Start automatic audits for one file, within its own daily limit. Returns how many were started."""
     log = logger.bind(user_id=job.user_id, job_id=job.id)
-    issues = outreach_issues(db, job.user_id, job.outreach_auto_send)
+    issues = outreach_issues(db, job.user_id, job.outreach_auto_send, job.purpose or "audit")
     if issues:
         log.info("file_outreach_skipped", reasons=issues)
         return 0
@@ -470,6 +501,7 @@ def poll_job(db: Session, job: ScrapingJob) -> int:
                 auto_send=job.outreach_auto_send,
                 email_account_id=_sending_account_id(db, job),
                 trigger="auto",
+                kind="agency" if job.purpose == "agency" else "audit",
             )
             started += 1
         except HTTPException as exc:

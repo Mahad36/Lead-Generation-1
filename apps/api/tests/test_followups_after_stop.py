@@ -12,7 +12,7 @@ def started_thread(db, user, account, days_ago=4):
 
     root = EmailMessage(user_id=user.id, email_account_id=account.id, recipient_email="owner@good.com",
                         subject="Your website", status="sent", sent_at=datetime.now(UTC) - timedelta(days=days_ago),
-                        followups_enabled=True)
+                        followups_enabled=True, open_count=1)
     db.add(root)
     db.commit()
     return root

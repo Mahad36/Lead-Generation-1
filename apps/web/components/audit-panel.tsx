@@ -37,6 +37,7 @@ export type Audit = Tracking & {
   outreach_angle?: string;
   platform_intel?: PlatformIntel;
   auto_send: boolean;
+  kind?: "audit" | "agency"; // agency: white-label pitch with your company profile (Agency outreach)
   overall_score: number | null;
   headline: string;
   has_pdf: boolean;
@@ -74,6 +75,12 @@ const STEPS: [string, string][] = [
   ["drafting_email", "Claude writes the email"],
   ["sending", "Send email with PDF attached"],
 ];
+// An agency pitch: no speed test, screenshots, review or audit PDF
+const AGENCY_STEPS: [string, string][] = [
+  ["fetching", "Read the agency's website"],
+  ["drafting_email", "Claude writes the pitch"],
+  ["sending", "Send email with your company profile"],
+];
 const ORDER = ["queued", "fetching", "measuring", "capturing", "analyzing", "generating_pdf", "drafting_email", "ready", "sending", "sent"];
 const RESOURCE_LABELS: Record<string, string> = {
   script: "JavaScript",
@@ -110,7 +117,7 @@ function StepList({ audit }: { audit: Audit }) {
   const current = ORDER.indexOf(audit.status);
   return (
     <ol className="space-y-1.5 text-sm">
-      {STEPS.map(([key, label]) => {
+      {(audit.kind === "agency" ? AGENCY_STEPS : STEPS).map(([key, label]) => {
         const index = ORDER.indexOf(key);
         let state: "done" | "active" | "failed" | "todo" = "todo";
         if ((failedAt >= 0 && index === failedAt) || (sendFailed && key === "sending")) state = "failed";
@@ -376,10 +383,12 @@ export function AuditPanel({
             ) : null}
             {audit.has_report && !running ? (
               <div className="flex flex-col gap-2">
-                <Button variant="secondary" onClick={() => regenerate("pdf")} disabled={!!busy}>
-                  {busy === "pdf" ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
-                  Regenerate PDF
-                </Button>
+                {audit.kind !== "agency" ? (
+                  <Button variant="secondary" onClick={() => regenerate("pdf")} disabled={!!busy}>
+                    {busy === "pdf" ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+                    Regenerate PDF
+                  </Button>
+                ) : null}
                 <Button variant="secondary" onClick={() => regenerate("email")} disabled={!!busy}>
                   {busy === "email" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Mail className="h-4 w-4" />}
                   Regenerate email
@@ -391,12 +400,16 @@ export function AuditPanel({
           {reviewable ? (
             <div className="space-y-4">
               <div className="flex flex-wrap items-center gap-4">
-                <div className={`text-4xl font-semibold ${scoreClass(audit.overall_score)}`}>
-                  {audit.overall_score ?? "—"}
-                  <span className="text-base text-muted">/100</span>
-                </div>
+                {audit.kind === "agency" ? null : (
+                  <div className={`text-4xl font-semibold ${scoreClass(audit.overall_score)}`}>
+                    {audit.overall_score ?? "—"}
+                    <span className="text-base text-muted">/100</span>
+                  </div>
+                )}
                 <div className="min-w-0 flex-1">
-                  <p className="font-medium">{audit.headline}</p>
+                  <p className="font-medium">
+                    {audit.kind === "agency" ? "White-label pitch · your company profile is attached" : audit.headline}
+                  </p>
                   <p className="text-xs text-muted">
                     {audit.ai_provider === "anthropic" ? `Claude · ${audit.ai_model}` : `${audit.ai_provider} · ${audit.ai_model}`}
                   </p>
@@ -448,7 +461,7 @@ export function AuditPanel({
                 </ul>
               ) : null}
 
-              <PlatformInsights
+              {audit.kind === "agency" ? null : <PlatformInsights
                 key={`${audit.id}:${audit.outreach_angle || ""}`}
                 auditId={audit.id}
                 platform={audit.platform}
@@ -456,7 +469,7 @@ export function AuditPanel({
                 opportunities={audit.report?.platform_opportunities}
                 angle={audit.outreach_angle}
                 onSaved={() => loadAudit(audit.id).catch(() => undefined)}
-              />
+              />}
 
               <div className="space-y-3 rounded-lg border border-border p-3">
                 <div className="flex items-center justify-between">

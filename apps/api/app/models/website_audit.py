@@ -33,6 +33,8 @@ class WebsiteAudit(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     recipient_email: Mapped[str] = mapped_column(String(320), default="", nullable=False)
     auto_send: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     trigger: Mapped[str] = mapped_column(String(16), default="manual", index=True, nullable=False)
+    # "audit": CRO audit PDF to a business; "agency": white-label pitch to an agency with your company profile PDF
+    kind: Mapped[str] = mapped_column(String(16), default="audit", server_default="audit", index=True, nullable=False)
     send_attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     # False after a permanent send failure (bad address, rejected): never retried automatically
     send_retryable: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)

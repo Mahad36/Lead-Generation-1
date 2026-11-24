@@ -37,6 +37,9 @@ class SettingsOut(BaseModel):
     email_verifier_usage: dict = {}
     email_verifier_key_set: bool = False
     portfolio_sheet_url: str = ""
+    agency_pitch: str = ""
+    agency_profile_filename: str = ""
+    agency_profile_size: int = 0
     contact_email: str
     contact_phone: str
     target_industries: str = ""
@@ -67,6 +70,7 @@ class SettingsOut(BaseModel):
     # Deliverability (on by default)
     followups_enabled: bool = True
     followup_days: str = "3,5"
+    followups_opened_only: bool = True
     send_window_enabled: bool = True
     send_window_start: int = 8
     send_window_end: int = 19
@@ -101,6 +105,7 @@ class SettingsUpdate(BaseModel):
     email_verifier_scope: Literal["risky", "all"] | None = None
     email_verifier_monthly_limit: int | None = Field(default=None, ge=0, le=100000)
     portfolio_sheet_url: str | None = None
+    agency_pitch: str | None = Field(default=None, max_length=8000)
     contact_email: str | None = None
     contact_phone: str | None = None
     target_industries: str | None = None
@@ -129,6 +134,7 @@ class SettingsUpdate(BaseModel):
     require_verified_emails: bool | None = None
     followups_enabled: bool | None = None
     followup_days: str | None = Field(default=None, max_length=64)
+    followups_opened_only: bool | None = None
     send_window_enabled: bool | None = None
     send_window_start: int | None = Field(default=None, ge=0, le=23)
     send_window_end: int | None = Field(default=None, ge=1, le=24)

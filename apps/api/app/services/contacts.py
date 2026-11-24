@@ -392,6 +392,11 @@ def ranked_contacts(lead: Lead, include_generic: bool = True) -> list[tuple[Lead
                 # another company's domain (the parent company, a neighbouring practice, the web agency): the
                 # business's own addresses come first; it's only used once a verification service confirms it
                 points, reason = max(points - 20, 1), other
+        if points > 0 and row.verification_status in ("unknown", "accept_all") and (
+                getattr(row, "verification_details", None) or {}).get("provider"):
+            # checked, but the service couldn't confirm it (role_based info@ / hello@, catch-all): it isn't emailed,
+            # so any confirmed address of the business comes first
+            points, reason = 1, f"{reason}; not confirmed by the verification service"
         if points > 0:
             rows.append((row, points, reason))
     return sorted(rows, key=lambda r: (-r[1], r[0].email))

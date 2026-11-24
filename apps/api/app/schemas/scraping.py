@@ -65,6 +65,8 @@ class ScrapingJobCreate(BaseModel):
     name: str = Field(min_length=1, max_length=255)
     searches: list[ScrapingSearchIn] = Field(min_length=1)
     max_results_per_search: int | None = Field(default=None, ge=1)
+    # "audit": website audit outreach (Scraping / Leads); "agency": white-label pitch (Agency outreach)
+    purpose: Literal["audit", "agency"] = "audit"
     auto_send: bool = True
     subject: str | None = None
     html_body: str | None = None
@@ -114,6 +116,7 @@ class ScrapingSearchOut(BaseModel):
 class ScrapingJobOut(BaseModel):
     id: str
     name: str
+    purpose: str = "audit"
     status: str
     max_results_per_search: int
     businesses_found: int

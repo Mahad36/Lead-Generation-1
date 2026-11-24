@@ -222,6 +222,7 @@ type FollowupStatus = {
   total: number;
   done: boolean;
   next_at: string | null;
+  waiting_for_open?: boolean;
 };
 
 /** Follow-ups after the emails sent to this lead: how many went out, when the next one is due, and a stop button. */
@@ -269,7 +270,9 @@ export function LeadFollowups({ leadId }: { leadId: string }) {
               ? r.sent >= r.total
                 ? " · all sent"
                 : " · stopped"
-              : r.next_at
+              : r.next_at && r.waiting_for_open
+                ? ` · waiting for them to open the email (follow-ups go to opened emails only)`
+                : r.next_at
                 ? ` · next ${formatDate(r.next_at)} (sending hours and the daily limit apply)`
                 : ""}
           </div>

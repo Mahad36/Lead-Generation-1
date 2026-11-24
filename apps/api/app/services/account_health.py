@@ -28,6 +28,7 @@ from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import func
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import flag_modified
 
 from app.logging_config import get_logger
 from app.models import EmailAccount, EmailMessage, SuppressionEntry
@@ -165,6 +166,15 @@ def provider_limit(account: EmailAccount) -> int | None:
     return None
 
 
+def fresh_start_of(account: EmailAccount) -> datetime | None:
+    """Since when this inbox's bounces and unsubscribes count (None = no fresh start was made)."""
+    raw = (getattr(account, "health", None) or {}).get("fresh_start")
+    try:
+        return datetime.fromisoformat(raw) if raw else None
+    except ValueError:
+        return None
+
+
 def _rate(numerator: int, denominator: int) -> float | None:
     return round(numerator / denominator, 4) if denominator else None
 
@@ -175,15 +185,19 @@ def gather_signals(db: Session, account: EmailAccount) -> dict:
     sent = base.filter(EmailMessage.sent_at.isnot(None))
     # Rates over the last 30 days only: an inbox held by health protection sends nothing, so old bounces must be
     # able to age out (otherwise a held inbox could never recover).
-    recent = sent.filter(EmailMessage.sent_at >= now - SIGNAL_WINDOW).order_by(EmailMessage.sent_at.desc()).limit(100).all()
+    # After a fresh start (start_fresh) only emails sent since then count.
+    since = max(now - SIGNAL_WINDOW, fresh_start_of(account) or now - SIGNAL_WINDOW)
+    recent = sent.filter(EmailMessage.sent_at >= since).order_by(EmailMessage.sent_at.desc()).limit(100).all()
     last50 = recent[:50]
     bounced = sum(1 for m in last50 if m.bounced_at)
-    suppressed = {
-        e for (e,) in db.query(SuppressionEntry.email).filter(
-            SuppressionEntry.user_id == account.user_id, ~SuppressionEntry.reason.ilike("%bounce%")
+    # Opt-outs: only people who used the unsubscribe link, each counted once (however many emails they got).
+    # A reply asking to stop and your own "Do not contact" still block that address, but don't count against the inbox.
+    unsubscribed = {
+        (e or "").lower() for (e,) in db.query(SuppressionEntry.email).filter(
+            SuppressionEntry.user_id == account.user_id, SuppressionEntry.reason == "user_unsubscribed"
         )
     }
-    opted_out = sum(1 for m in recent if (m.recipient_email or "").lower() in suppressed)
+    opted_out = len({(m.recipient_email or "").lower() for m in recent} & unsubscribed)
     failures = dict(
         db.query(EmailMessage.error_kind, func.count(EmailMessage.id))
         .filter(
@@ -262,6 +276,20 @@ def decide(account: EmailAccount, signals: dict, now: datetime | None = None) ->
     if watch:
         return "monitoring", "Watching: " + "; ".join(watch) + ".", 1.0
     return "healthy", "No warning signs in recent sending (bounces, unsubscribes and Gmail errors are low).", 1.0
+
+
+def start_fresh(db: Session, account: EmailAccount) -> dict:
+    """Your decision: this inbox's earlier bounces and unsubscribes stop counting, and low speed ends. Sending returns to
+    your daily limit, and only emails sent from now on are judged, so new bounces raise the same warnings and holds.
+    Gmail blocks, blacklists, DNS and the bounced / unsubscribed addresses themselves aren't touched. Undo: remove
+    health["fresh_start"]."""
+    health = dict(account.health or {})
+    health.pop("low_speed", None)
+    health["fresh_start"] = datetime.now(UTC).isoformat()
+    account.health = health
+    flag_modified(account, "health")
+    db.commit()
+    return assess(db, account)
 
 
 def assess(db: Session, account: EmailAccount) -> dict:

@@ -9,11 +9,15 @@ How it's used, to stay within a small free allowance:
   - scope "risky" (default): only leads more likely to bounce: an address that isn't on the website's own domain,
     or a business type that has bounced 5% or more in your own sending
   - each address is checked once (the result is stored on the lead's email)
-  - at most `email_verifier_monthly_limit` checks a month; when the allowance runs out, outreach carries on as
-    before (the free checks still apply), never stops
+  - at most `email_verifier_monthly_limit` checks a month. Scope "risky": when the allowance runs out, outreach
+    carries on as before (the free checks still apply). Scope "all" (every lead is checked): an address that can't be
+    checked isn't emailed; new first emails wait until checks are available again (nohosalonyc@gmail.com went out
+    unchecked after the allowance ran out, and bounced)
 
 Results: valid / invalid / accept_all (the domain accepts every address, so it can't be confirmed) / unknown.
-Only "invalid" stops the email; anything else goes out as before.
+Only a confirmed "valid" is emailed once the service has checked an address: invalid, accept_all and unknown are
+blocked (a shared inbox like hello@ / info@ that ZeroBounce only labels "role_based" is unknown: it isn't confirmed
+to exist, and one bounced). The lead's next-best address, e.g. a confirmed one, is used instead.
 """
 
 from __future__ import annotations
@@ -35,7 +39,9 @@ logger = get_logger("email_verify")
 PROVIDERS = {"zerobounce": "ZeroBounce", "hunter": "Hunter", "own": "Your mailbox checker"}
 CHECKED = {"valid", "invalid", "accept_all", "unknown"}
 RISKY_BOUNCE_RATE, RISKY_MIN_SENT = 0.03, 10  # 3%: steady, not flipping around 5% from one email to the next
-DELIVERABLE_DO_NOT_MAIL = {"role_based": "valid", "role_based_catch_all": "accept_all", "mx_forward": "valid"}
+# ZeroBounce "do_not_mail" sub-statuses that aren't dead addresses: a shared inbox (info@, hello@) is only labelled,
+# not confirmed to exist (hello@nezevents.com was "role_based" and bounced: no such user), so it isn't "valid"
+DELIVERABLE_DO_NOT_MAIL = {"role_based": "unknown", "role_based_catch_all": "accept_all", "mx_forward": "valid"}
 ADMIN_LIKE = {"admin", "administrator", "mail", "email", "webmaster", "web", "hosting", "it", "tech"}
 TIMEOUT = 20
 
@@ -79,8 +85,6 @@ def verify_with(provider: str, key: str, email: str, url: str = "") -> dict:
             "catch-all": "accept_all",
         }.get(status, "unknown")
         if status == "do_not_mail" and sub in DELIVERABLE_DO_NOT_MAIL:
-            # ZeroBounce's "do not mail" for marketing lists also covers shared inboxes (info@, office@): they exist,
-            # and for a small business they're usually the right address
             mapped = DELIVERABLE_DO_NOT_MAIL[sub]
         return {"status": mapped, "detail": " / ".join(x for x in (status, data.get("sub_status")) if x), "raw": data}
     if provider == "hunter":
@@ -235,8 +239,10 @@ def _save_usage(db: Session, settings: UserSettings, usage: dict) -> None:
 
 
 def verification_problem(db: Session, user_id: str, lead: Lead | None, email: str) -> str:
-    """Before an audit / campaign email: "" to go ahead, else why not (the verifier says the mailbox doesn't
-    exist). Never blocks for any other reason: no provider, not risky, allowance used up, or an error."""
+    """Before an audit / campaign email: "" to go ahead, else why not: the verifier says the mailbox doesn't exist,
+    or it checked the address and couldn't confirm it (accept_all / unknown / role_based). With scope "all", an address
+    the service can't check right now (allowance used up, out of credits, an error) waits: the reason starts with
+    RETRY_LATER. Otherwise an unchecked address isn't blocked unless it's a risky type."""
     if not lead or not email:
         return ""
     settings = db.query(UserSettings).filter(UserSettings.user_id == user_id).first()
@@ -255,10 +261,8 @@ def verification_problem(db: Session, user_id: str, lead: Lead | None, email: st
         .first()
     )
     if stored and stored.verification_status in CHECKED:
-        status = stored.verification_status
-        if must and status in ("unknown", "accept_all"):
-            return _unconfirmed(must, "the verification service couldn't confirm this mailbox")
-        return _problem(status, address, (stored.verification_details or {}).get("detail", ""), settings)
+        return _problem(stored.verification_status, address, (stored.verification_details or {}).get("detail", ""),
+                        settings, must)
     reason = ""
     if settings.email_verifier_scope != "all":
         reason = must or risky_reason(address, lead.website_url or "", lead.category or "", risky_categories(db, user_id))
@@ -266,7 +270,13 @@ def verification_problem(db: Session, user_id: str, lead: Lead | None, email: st
             return ""
     usage = _usage(settings)
     own = settings.email_verifier_provider == "own"  # your own checker: no allowance to stay within
-    if not own and (usage.get("exhausted") or usage.get("used", 0) >= (settings.email_verifier_monthly_limit or 0)):
+    every_lead = settings.email_verifier_scope == "all"
+    # Scope "all" keeps asking when the service said the credits were gone (that costs nothing): sending resumes by
+    # itself once credits are added
+    if not own and ((usage.get("exhausted") and not every_lead)
+                    or usage.get("used", 0) >= (settings.email_verifier_monthly_limit or 0)):
+        if every_lead:
+            return _cant_check(settings, f"this month's limit of {settings.email_verifier_monthly_limit or 0} checks is used up")
         return _unconfirmed(must, "this month's verification checks are used up")  # others carry on as before
     try:
         key = decrypt_text(settings.encrypted_email_verifier_key)
@@ -277,11 +287,15 @@ def verification_problem(db: Session, user_id: str, lead: Lead | None, email: st
             usage["exhausted"] = True
             _save_usage(db, settings, usage)
             db.commit()
+        if every_lead:
+            return _cant_check(settings, "it has no credits left" if exc.quota else "it didn't answer")
         return _unconfirmed(must, "the verification service didn't answer")
-    except Exception as exc:  # network trouble: never block an ordinary address on it
+    except Exception as exc:  # network trouble: with scope "risky" an ordinary address isn't blocked on it
         logger.warning("email_verify_error", provider=settings.email_verifier_provider, error=str(exc)[:200])
+        if every_lead:
+            return _cant_check(settings, "it didn't answer")
         return _unconfirmed(must, "the verification service didn't answer")
-    usage["used"] = usage.get("used", 0) + 1
+    usage["used"], usage["exhausted"] = usage.get("used", 0) + 1, False
     _save_usage(db, settings, usage)
     details = {
         "provider": settings.email_verifier_provider,
@@ -298,10 +312,32 @@ def verification_problem(db: Session, user_id: str, lead: Lead | None, email: st
         lead.email_verification_status = result["status"]
     db.commit()
     logger.info("email_verified", email=address, status=result["status"], why=reason or "all")
-    if must and result["status"] in ("unknown", "accept_all"):
-        # accept_all: the domain says yes to every address, so this mailbox isn't actually confirmed
-        return _unconfirmed(must, "the verification service couldn't confirm this mailbox")
-    return _problem(result["status"], address, result["detail"], settings)
+    return _problem(result["status"], address, result["detail"], settings, must)
+
+
+def confirmed_cc(db: Session, user_id: str, lead: Lead | None, emails: list[str]) -> list[str]:
+    """When every lead is checked, only addresses the service already confirmed are CC'd: a CC can bounce like any
+    other address. An unconfirmed one is left out of the email (no check is spent on it; the email itself still goes)."""
+    settings = db.query(UserSettings).filter(UserSettings.user_id == user_id).first()
+    if (not emails or not settings or settings.email_verifier_provider not in PROVIDERS
+            or settings.email_verifier_scope != "all"):
+        return emails
+    from app.services.contacts import _confirmed
+
+    confirmed = {row.email.lower() for row in (lead.emails if lead else []) if _confirmed(row)}
+    kept = [address for address in emails if address.lower() in confirmed]
+    if len(kept) < len(emails):
+        logger.info("cc_left_out_unconfirmed", left_out=len(emails) - len(kept))
+    return kept
+
+
+def _cant_check(settings: UserSettings, why: str) -> str:
+    """Every lead is meant to be checked and this address can't be right now: it waits, it isn't given up on."""
+    from app.services.address_check import RETRY_LATER
+
+    name = PROVIDERS.get(settings.email_verifier_provider, "The verifier")
+    return (f"{RETRY_LATER}{name} can't check addresses right now ({why}), so no new first emails go out, to avoid "
+            "bounces. They resume by themselves once checks are available (Settings: monthly limit, or more credits).")
 
 
 def _unconfirmed(must: str, why: str) -> str:
@@ -311,10 +347,16 @@ def _unconfirmed(must: str, why: str) -> str:
     return f"Blocked: {must}. It's only emailed once a verification service confirms the mailbox ({why})."
 
 
-def _problem(status: str, email: str, detail: str, settings: UserSettings) -> str:
+def _problem(status: str, email: str, detail: str, settings: UserSettings, must: str = "") -> str:
+    name = PROVIDERS.get(settings.email_verifier_provider, "The verifier")
+    if status in ("unknown", "accept_all"):
+        # accept_all: the domain says yes to every address; unknown / role_based: not confirmed. Either could bounce
+        if must:
+            return _unconfirmed(must, "the verification service couldn't confirm this mailbox")
+        return (f"Blocked: {name} couldn't confirm the mailbox {email} exists ({detail or status}), so it could "
+                "bounce. Only confirmed addresses are emailed.")
     if status != "invalid":
         return ""
-    name = PROVIDERS.get(settings.email_verifier_provider, "The verifier")
     return f"{name} says the mailbox {email} doesn't exist ({detail or 'invalid'}), so it would bounce."
 
 

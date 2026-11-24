@@ -22,6 +22,7 @@ export type Outreach = Tracking & {
   score: number | null;
   has_pdf: boolean;
   pdf_filename: string;
+  kind?: "audit" | "agency"; // agency: a white-label pitch with your company profile (no audit)
   has_email: boolean;
   email_subject: string;
   sent_at: string | null;
@@ -50,6 +51,18 @@ const STAGES: [string, string][] = [
   ["audited", "Website audited"],
   ["pdf_generated", "PDF generated"],
   ["email_generated", "Email generated"],
+  ["sent", "Email sent"],
+  ["opened", "Opened"],
+  ["clicked", "Link clicked"],
+  ["replied", "Replied"],
+];
+// An agency pitch: Claude reads the agency's website and writes the pitch; your company profile is attached
+const AGENCY_STAGES: [string, string][] = [
+  ["scraped", "Scraped"],
+  ["website_found", "Website found"],
+  ["auditing", "Website read"],
+  ["pdf_generated", "Pitch written"],
+  ["email_generated", "Ready to send"],
   ["sent", "Email sent"],
   ["opened", "Opened"],
   ["clicked", "Link clicked"],
@@ -102,13 +115,15 @@ export function OutreachStepper({ o }: { o: Outreach }) {
       <ol className="flex flex-wrap gap-x-3 gap-y-2 text-sm">
         {STAGES.map(([key, label], index) => {
           const state = index < at ? "done" : index === at ? mode : "todo";
+          if (o.kind === "agency" && key === "audited") return null;
+          const shown = o.kind === "agency" ? AGENCY_STAGES.find(([k]) => k === key)?.[1] || label : label;
           return (
             <li key={key} className="flex items-center gap-1">
               {state === "done" ? <CheckCircle2 className="h-4 w-4 text-emerald-600" /> : null}
               {state === "active" ? <Loader2 className="h-4 w-4 animate-spin text-amber-600" /> : null}
               {state === "failed" ? <XCircle className="h-4 w-4 text-red-600" /> : null}
               {state === "todo" ? <Circle className="h-4 w-4 text-muted" /> : null}
-              <span className={state === "todo" ? "text-muted" : ""}>{label}</span>
+              <span className={state === "todo" ? "text-muted" : ""}>{shown}</span>
             </li>
           );
         })}
@@ -117,7 +132,9 @@ export function OutreachStepper({ o }: { o: Outreach }) {
       {o.error ? <p className="text-sm text-red-600">{o.error}</p> : null}
       {o.note ? <p className="text-sm text-muted">{o.note}</p> : null}
       {["no_website", "no_email", "do_not_contact"].includes(o.stage) ? (
-        <p className="text-sm text-muted">{o.stage_label}: this lead can&apos;t be audited and emailed automatically.</p>
+        <p className="text-sm text-muted">
+          {o.stage_label}: this lead can&apos;t be {o.kind === "agency" ? "pitched" : "audited and emailed"} automatically.
+        </p>
       ) : null}
     </div>
   );
@@ -139,17 +156,22 @@ export function OutreachTable({
   leads,
   actions,
   scroll = false,
+  agency = false,
 }: {
   leads: OutreachLead[];
   actions?: (lead: OutreachLead) => ReactNode;
   scroll?: boolean; // a scroll box (header stays visible) instead of growing the page
+  agency?: boolean; // Agency outreach: no audit score; the attachment is your company profile
 }) {
+  const headers = agency
+    ? ["Agency", "Email", "Website", "Workflow", "Profile", "Email status", "Sent from", ""]
+    : ["Company", "Email", "Website", "Workflow", "Score", "PDF", "Email status", "Sent from", ""];
   return (
     <div className={`overflow-x-auto rounded-xl border border-border bg-card ${scroll ? "max-h-[70vh] overflow-y-auto" : ""}`}>
       <table className="min-w-full text-left text-sm">
         <thead className={`text-xs uppercase text-muted ${scroll ? "sticky top-0 z-10 bg-card shadow-sm" : ""}`}>
           <tr>
-            {["Company", "Email", "Website", "Workflow", "Score", "PDF", "Email status", "Sent from", ""].map((h) => (
+            {headers.map((h) => (
               <th key={h} className="whitespace-nowrap px-3 py-2">
                 {h}
               </th>
@@ -188,7 +210,7 @@ export function OutreachTable({
                   <StageBadge o={o} />
                   {o?.attempts && o.attempts > 1 ? <div className="text-xs text-muted">{o.attempts} attempts</div> : null}
                 </td>
-                <td className="px-3 py-2">{o?.score ?? "—"}</td>
+                {agency ? null : <td className="px-3 py-2">{o?.score ?? "—"}</td>}
                 <td className="whitespace-nowrap px-3 py-2">
                   {o?.has_pdf && o.audit_id ? (
                     <span className="flex gap-1">

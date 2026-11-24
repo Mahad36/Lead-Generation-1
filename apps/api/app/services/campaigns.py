@@ -846,9 +846,18 @@ def send_claimed_lead(db: Session, campaign_lead: CampaignLead) -> str:
         campaign_lead.locked_at = None
         db.commit()
         return "failed"
-    from app.services.email_verification import verification_problem
+    # An inbox that can't send this today: hold before the checks, so no credit is spent on an email that can't go out
+    # (guard() below checks again with the inbox locked).
+    from app.services.send_protection import evaluate, record_state
 
-    from app.services.address_check import check as address_check
+    verdict = evaluate(db, account)
+    if not verdict.ok:
+        if verdict.safety_block:
+            record_state(account, verdict)
+        return hold_campaign_lead(db, campaign.id, campaign_lead.id, verdict)
+    from app.services.email_verification import confirmed_cc, verification_problem
+
+    from app.services.address_check import RETRY_LATER, check as address_check
     from app.services.address_check import low_risk_only
 
     problem = address_problem(db, campaign.user_id, to)
@@ -862,6 +871,12 @@ def send_claimed_lead(db: Session, campaign_lead: CampaignLead) -> str:
     if not problem and not local.low_risk:
         problem = local.reason  # fail closed: an inconclusive local risk check holds the address
     problem = problem or verification_problem(db, campaign.user_id, lead, to)
+    if problem.startswith(RETRY_LATER):
+        # The verification service can't check right now: not sent, back in the queue to be checked again
+        campaign_lead.status, campaign_lead.locked_at, campaign_lead.locked_by = "queued", None, ""
+        campaign_lead.error_message = problem
+        db.commit()
+        return "address_check_waiting"
     if problem:
         campaign_lead.status = "skipped"
         campaign_lead.skip_reason = (
@@ -872,7 +887,7 @@ def send_claimed_lead(db: Session, campaign_lead: CampaignLead) -> str:
         campaign_lead.locked_at = None
         db.commit()
         return "skipped"
-    cc = low_risk_only(db, campaign.user_id, cc)
+    cc = confirmed_cc(db, campaign.user_id, lead, low_risk_only(db, campaign.user_id, cc))
     if not (campaign_lead.subject or "").strip() or not (campaign_lead.html_body or "").strip():
         campaign_lead.status = "failed"
         campaign_lead.error_message = "Email content is missing"

@@ -28,6 +28,8 @@ class ScrapingJob(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     extra: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
+    # "audit": businesses get a website audit; "agency": agencies get the white-label pitch (Agency outreach tab)
+    purpose: Mapped[str] = mapped_column(String(16), default="audit", server_default="audit", index=True, nullable=False)
     # Automatic outreach for this file only: "off" | "running" | "paused" | "stopped", its send mode and daily limit
     outreach_status: Mapped[str] = mapped_column(String(16), default="off", index=True, nullable=False)
     outreach_auto_send: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)

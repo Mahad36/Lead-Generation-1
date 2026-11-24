@@ -59,8 +59,44 @@ export const BUSINESS_TYPE_GROUPS: { group: string; types: string[] }[] = [
   },
 ];
 
+/**
+ * Agency outreach: agencies that sell web, Shopify and marketing work to their clients and could hand the delivery
+ * to a white-label partner.
+ */
+export const AGENCY_TYPE_GROUPS: { group: string; types: string[] }[] = [
+  {
+    group: "Shopify and ecommerce",
+    types: [
+      "Shopify agency", "Shopify Plus agency", "Shopify developers", "Ecommerce agency", "Ecommerce marketing agency",
+      "DTC marketing agency", "BigCommerce agency", "WooCommerce developers",
+    ],
+  },
+  {
+    group: "Web design and development",
+    types: [
+      "Web design agency", "Web development company", "WordPress agency", "Webflow agency", "UX design agency",
+      "CRO agency", "Branding agency", "Creative agency",
+    ],
+  },
+  {
+    group: "Marketing agencies",
+    types: [
+      "Marketing agency", "Digital marketing agency", "SEO agency", "PPC agency", "Social media marketing agency",
+      "Advertising agency", "Email marketing agency", "Growth marketing agency", "Content marketing agency",
+    ],
+  },
+];
+
 /** A dropdown of suggested business types; picking one adds it (typing your own still works next to it). */
-export function BusinessTypeSelect({ selected, onAdd }: { selected: string[]; onAdd: (type: string) => void }) {
+export function BusinessTypeSelect({
+  selected,
+  onAdd,
+  groups = BUSINESS_TYPE_GROUPS,
+}: {
+  selected: string[];
+  onAdd: (type: string) => void;
+  groups?: { group: string; types: string[] }[];
+}) {
   return (
     <select
       className="h-10 rounded-md border border-border bg-card px-3 text-sm"
@@ -71,7 +107,7 @@ export function BusinessTypeSelect({ selected, onAdd }: { selected: string[]; on
       }}
     >
       <option value="">Choose from the list...</option>
-      {BUSINESS_TYPE_GROUPS.map((g) => (
+      {groups.map((g) => (
         <optgroup key={g.group} label={g.group}>
           {g.types.map((t) => (
             <option key={t} value={t} disabled={selected.includes(t)}>

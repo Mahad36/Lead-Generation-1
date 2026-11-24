@@ -60,6 +60,8 @@ def list_audits(
     q: str | None = Query(default=None, max_length=200),
     platform: str | None = Query(default=None, max_length=64),
     finding_type: str | None = Query(default=None, max_length=32),
+    view: str | None = Query(default=None, pattern="^(main|not_sent|sent|pending)$"),
+    kind: str | None = Query(default=None, pattern="^(audit|agency)$"),
     page: int | None = Query(default=None, ge=1),
     page_size: int = Query(default=25, ge=1, le=200),
     user: User = Depends(get_current_user),
@@ -68,15 +70,20 @@ def list_audits(
     """Audits, newest first. With `page`: {items, total, page, page_size} (Website audits page); else the latest 50."""
     offset = (page - 1) * page_size if page else 0
     audits = audit_service.list_audits(
-        db, user.id, lead_id, q=q, limit=page_size if page else 50, offset=offset, platform=platform, finding_type=finding_type
+        db, user.id, lead_id, q=q, limit=page_size if page else 50, offset=offset, platform=platform, finding_type=finding_type,
+        view=view,
+        kind=kind,
     )
     for audit in audits:
         audit_service._expire_stale(db, audit)
     # Platform from the audit's own detection, else the lead's (from the website analysis)
     lead_ids = {a.lead_id for a in audits if a.lead_id}
-    platforms = (
-        dict(db.query(Lead.id, Lead.platform).filter(Lead.id.in_(lead_ids)).all()) if lead_ids else {}
+    lead_rows = (
+        db.query(Lead.id, Lead.platform, Lead.business_name, Lead.city).filter(Lead.id.in_(lead_ids)).all()
+        if lead_ids else []
     )
+    platforms = {r[0]: r[1] for r in lead_rows}
+    businesses = {r[0]: (r[2] or "", r[3] or "") for r in lead_rows}
     # The inbox each email went from (rotation picks it when sending; set on the audit then)
     account_ids = {a.email_account_id for a in audits if a.email_account_id and a.sent_at}
     senders = (
@@ -89,10 +96,12 @@ def list_audits(
         data = audit_service.serialize_audit(a, full=False)
         data["platform"] = data.get("platform") or platforms.get(a.lead_id) or ""
         data["sent_from"] = senders.get(a.email_account_id, "") if a.sent_at else ""
+        data["business_name"], data["city"] = businesses.get(a.lead_id, ("", ""))
+        data["email_subject"] = a.email_subject or ""
         items.append(data)
     if not page:
         return items
-    total = audit_service.count_audits(db, user.id, lead_id, q=q, platform=platform, finding_type=finding_type)
+    total = audit_service.count_audits(db, user.id, lead_id, q=q, platform=platform, finding_type=finding_type, view=view, kind=kind)
     return {"items": items, "total": total, "page": page, "page_size": page_size}
 
 
